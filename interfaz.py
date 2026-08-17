@@ -1,17 +1,27 @@
-# interfaz.py  ─── Interfaz GDS-15 con RabbitMQ
+# interfaz.py  ─── Interfaz GDS-15: solo entrada de usuario + RPC por RabbitMQ
+#
+# IMPORTANTE: este archivo YA NO declara el exchange de solicitudes. Esa parte
+# es responsabilidad de intermediario.py, que debe ejecutarse primero (una vez)
+# para dejar creada la topología. Aquí solo publicamos asumiendo que el
+# exchange y el binding hacia service.py ya existen.
 #
 # Variables de entorno (configurables):
-#   RABBIT_HOST      default: localhost
-#   COLA_SOLICITUD   default: gds15.solicitud
-#   COLA_RESPUESTAS  default: gds15.resultados.<hostname>
+#   RABBIT_HOST         default: localhost
+#   EXCHANGE_SOLICITUD  default: geriatricos.solicitudes   (creado por intermediario.py)
+#   ROUTING_KEY_GDS15   default: gds15
+#   COLA_RESPUESTAS     default: gds15.resultados.<hostname>
 
-from socket import gethostname, socket
+from socket import gethostname
 import os, json, uuid, pika
 from datetime import datetime
 
-RABBIT_HOST     = os.getenv("RABBIT_HOST",    "localhost")
-COLA_SOLICITUD  = os.getenv("COLA_SOLICITUD", "gds15.solicitud")
-COLA_RESPUESTAS = os.getenv("COLA_RESPUESTAS", f"gds15.resultados.{gethostname()}")
+RABBIT_HOST        = os.getenv("RABBIT_HOST",        "localhost")
+
+# Debe coincidir con lo que declaró intermediario.py
+EXCHANGE_SOLICITUD  = os.getenv("EXCHANGE_SOLICITUD",  "geriatricos.solicitudes")
+ROUTING_KEY_GDS15   = os.getenv("ROUTING_KEY_GDS15",   "gds15")
+
+COLA_RESPUESTAS     = os.getenv("COLA_RESPUESTAS", f"gds15.resultados.{gethostname()}")
 
 PREGUNTAS = (
     ("¿En general, está satisfecho(a) con su vida?",                              "NO"),
@@ -53,14 +63,18 @@ def codificar(respuestas):
 
 # ── Comunicación con RabbitMQ ─────────────────────────────────────────────────
 def enviar_y_esperar(mensaje: dict) -> dict:
-    """Publica en gds15.solicitud y espera respuesta en reply_to (RPC síncrono)."""
+    """Publica en el exchange de solicitudes (con routing key propia de GDS-15)
+    y espera respuesta en reply_to (RPC síncrono)."""
     correlation_id = str(uuid.uuid4())
     mensaje["correlation_id"] = correlation_id
     mensaje["reply_to"]       = COLA_RESPUESTAS
 
     conn    = pika.BlockingConnection(pika.ConnectionParameters(RABBIT_HOST))
     channel = conn.channel()
-    channel.queue_declare(queue=COLA_SOLICITUD,  durable=True)
+
+    # El exchange de solicitudes ya lo creó intermediario.py; aquí solo
+    # declaramos NUESTRA cola exclusiva de respuestas (esa sí es propia
+    # de cada instancia de la interfaz, por eso se declara aquí).
     channel.queue_declare(queue=COLA_RESPUESTAS, exclusive=True)
 
     respuesta_recibida = {}
@@ -72,8 +86,8 @@ def enviar_y_esperar(mensaje: dict) -> dict:
 
     channel.basic_consume(queue=COLA_RESPUESTAS, on_message_callback=on_respuesta, auto_ack=True)
     channel.basic_publish(
-        exchange="",
-        routing_key=COLA_SOLICITUD,
+        exchange=EXCHANGE_SOLICITUD,      # ya no es el exchange por defecto ""
+        routing_key=ROUTING_KEY_GDS15,    # el intermediario enruta con esta key
         properties=pika.BasicProperties(
             reply_to=COLA_RESPUESTAS,
             correlation_id=correlation_id,
@@ -163,11 +177,16 @@ def modo_historico():
 
 # ── Presentación de resultados ────────────────────────────────────────────────
 def mostrar_resultado(respuestas, bits, resultado):
+    if resultado.get("status") == "error":
+        print(f"\n  [!] Error del servicio: {resultado.get('error')}\n")
+        return
+
     puntaje = resultado["puntaje"]
     print("\n" + "=" * 62)
     print("  RESULTADO  GDS-15")
     print("=" * 62)
-    print(f"\n  Puntaje     : {puntaje} / 15")
+    print(f"\n  ID Test     : {resultado.get('id_test', '-')}")
+    print(f"  Puntaje     : {puntaje} / 15")
     print(f"  Nivel       : {resultado['nivel']}")
     print(f"  Descripción : {resultado['descripcion']}")
     print("\n  -- Árbol de decisión --")
@@ -186,7 +205,8 @@ def mostrar_resultado(respuestas, bits, resultado):
 
 # ── Menú principal ────────────────────────────────────────────────────────────
 def main():
-    print("\n  GDS-15  |  Broker: {}  |  Cola entrada: {}".format(RABBIT_HOST, COLA_SOLICITUD))
+    print("\n  GDS-15  |  Broker: {}  |  Exchange: {}  |  Routing key: {}".format(
+        RABBIT_HOST, EXCHANGE_SOLICITUD, ROUTING_KEY_GDS15))
     print("  [1] Aplicar test")
     print("  [2] Consultar histórico")
     opcion = input("\n  Opción: ").strip()
