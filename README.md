@@ -1,4 +1,5 @@
-# GDS-15 — Escala de Depresión Geriátrica (microservicio)
+# GDS-15 — Escala de Depresión Geriátrica (Microservicio)
+**Autor:** David Carcamo Bonifacio
 
 Microservicio para aplicar y consultar el histórico de la **Escala de Depresión Geriátrica de Yesavage, versión abreviada (GDS-15)**, un test clínico de 15 preguntas Sí/No usado para detectar síntomas depresivos en adultos mayores.
 
@@ -48,6 +49,8 @@ Para el detalle exacto de los mensajes JSON de entrada/salida y el esquema de la
 
 ### Instalar RabbitMQ
 
+#### macOS / Linux
+
 **Opción A — Docker (recomendada):**
 
 ```bash
@@ -76,7 +79,58 @@ sudo systemctl start rabbitmq-server
 sudo rabbitmq-plugins enable rabbitmq_management
 ```
 
+#### Windows
+
+**Opción A — Docker Desktop (recomendada, más simple):**
+
+1. Instala [Docker Desktop para Windows](https://www.docker.com/products/docker-desktop/) (requiere WSL2, que el instalador configura automáticamente si no lo tienes).
+2. Abre **PowerShell** o **CMD** y ejecuta:
+
+   ```powershell
+   docker run -d --name rabbitmq -p 5672:5672 -p 15672:15672 rabbitmq:3-management
+   ```
+
+3. Verifica que quedó corriendo:
+
+   ```powershell
+   docker ps
+   ```
+
+4. Entra a `http://localhost:15672` (usuario/contraseña por defecto `guest`/`guest`).
+
+**Opción B — instalación nativa en Windows:**
+
+RabbitMQ corre sobre Erlang, así que primero hay que instalar Erlang y después RabbitMQ.
+
+1. Descarga e instala **Erlang/OTP** para Windows desde:
+   `https://www.erlang.org/downloads`
+   (elige el instalador `.exe` de 64 bits y deja las opciones por defecto).
+
+2. Descarga e instala **RabbitMQ Server** para Windows desde:
+   `https://www.rabbitmq.com/docs/install-windows`
+   (el instalador `.exe` detecta automáticamente la instalación de Erlang).
+
+3. El instalador registra RabbitMQ como **servicio de Windows** y lo inicia automáticamente. Puedes verificarlo abriendo:
+
+   ```powershell
+   services.msc
+   ```
+
+   y buscando "RabbitMQ" en la lista — debe decir "En ejecución".
+
+4. Habilita el panel de administración web. Abre **"RabbitMQ Command Prompt (sbin dir)"** desde el menú de inicio (lo instala el propio instalador) y ejecuta:
+
+   ```powershell
+   rabbitmq-plugins enable rabbitmq_management
+   ```
+
+5. Entra a `http://localhost:15672` (usuario/contraseña por defecto `guest`/`guest`).
+
+> **Nota:** si usas WSL2 para correr Python (en vez de Python nativo de Windows), y RabbitMQ corre en Windows (no en Docker dentro de WSL), usa `RABBIT_HOST=localhost` normalmente — WSL2 resuelve `localhost` hacia Windows automáticamente en versiones recientes. Si no te conecta, usa la IP de tu máquina Windows en la red local en vez de `localhost`.
+
 ### Instalar dependencias de Python
+
+**macOS / Linux:**
 
 ```bash
 pip install pika --break-system-packages
@@ -84,11 +138,33 @@ pip install pika --break-system-packages
 
 (si usas un entorno virtual, omite la bandera `--break-system-packages`)
 
+**Windows:**
+
+```powershell
+pip install pika
+```
+
+Si tienes varias versiones de Python instaladas y `pip` no apunta a la correcta, usa:
+
+```powershell
+py -m pip install pika
+```
+
+Se recomienda usar un entorno virtual para no mezclar dependencias con otros proyectos:
+
+```powershell
+python -m venv venv
+venv\Scripts\activate
+pip install pika
+```
+
 ---
 
 ## 4. Cómo usarlo
 
 El **orden de ejecución importa**: el intermediario debe existir antes de que el servicio o la interfaz intenten usarlo.
+
+**macOS / Linux:**
 
 ```bash
 # 1. Levantar la infraestructura de mensajería (una sola vez)
@@ -100,6 +176,23 @@ python3 service.py
 # 3. Usar la interfaz (cada vez que un usuario quiera aplicar o consultar un test)
 python3 interfaz.py
 ```
+
+**Windows (PowerShell o CMD):**
+
+```powershell
+# 1. Levantar la infraestructura de mensajería (una sola vez)
+python intermediario.py
+
+# 2. Levantar el servicio (queda corriendo, escuchando solicitudes)
+python service.py
+
+# 3. Usar la interfaz (cada vez que un usuario quiera aplicar o consultar un test)
+python interfaz.py
+```
+
+> En Windows, si el comando `python` no se reconoce, prueba con `py` en su lugar (`py intermediario.py`, `py service.py`, `py interfaz.py`).
+
+Cada uno de estos comandos debe correr en su **propia ventana/terminal**, ya que `service.py` y (mientras espera respuesta) `interfaz.py` quedan bloqueados escuchando. En Windows puedes abrir varias ventanas de PowerShell, o usar Windows Terminal con pestañas.
 
 Si `service.py` o `interfaz.py` se ejecutan antes que `intermediario.py`, fallarán porque la cola/exchange todavía no existen — es intencional, para forzar el orden correcto.
 
@@ -129,8 +222,24 @@ Todas las variables tienen un valor por defecto pensado para correr todo en `loc
 
 Ejemplo de uso con variables personalizadas:
 
+**macOS / Linux:**
+
 ```bash
 RABBIT_HOST=192.168.1.50 DB_PATH=/datos/gds15.db python3 service.py
+```
+
+**Windows (PowerShell):**
+
+```powershell
+$env:RABBIT_HOST="192.168.1.50"; $env:DB_PATH="C:\datos\gds15.db"; python service.py
+```
+
+**Windows (CMD):**
+
+```cmd
+set RABBIT_HOST=192.168.1.50
+set DB_PATH=C:\datos\gds15.db
+python service.py
 ```
 
 > **Importante:** `EXCHANGE_SOLICITUD` y `ROUTING_KEY_GDS15` deben tener el **mismo valor** en `intermediario.py` y en `interfaz.py`, o los mensajes nunca llegarán a `service.py`.
