@@ -5,15 +5,29 @@
 # para dejar creada la topología de mensajería. Aquí solo nos conectamos a la
 # cola que el intermediario ya dejó lista.
 #
+# Persistencia: MySQL vía SQLAlchemy (antes SQLite). El contrato JSON de
+# entrada/salida NO cambia — interfaz.py e intermediario.py no requieren
+# ninguna modificación.
+#
 # Variables de entorno (configurables):
 #   RABBIT_HOST        default: localhost
 #   COLA_SOLICITUD     default: gds15.solicitud            (cola creada por intermediario.py)
 #   EXCHANGE_EVENTOS   default: geriatricos.eventos        (exchange creado por intermediario.py)
-#   DB_PATH            default: gds15.db
+#   DB_HOST            default: localhost
+#   DB_PORT            default: 3306
+#   DB_USER            default: root
+#   DB_PASSWORD        default: "" (vacío)
+#   DB_NAME            default: gds15
+#   DB_URL             opcional: si se define, sobreescribe DB_HOST/PORT/USER/PASSWORD/NAME
+#                      (ej: mysql+pymysql://usuario:clave@host:3306/gds15?charset=utf8mb4)
 
-import os, json, sqlite3
+import os, json
 from datetime import datetime, timezone
 import pika
+from sqlalchemy import (
+    create_engine, MetaData, Table, Column,
+    Integer, String, Text, select, insert
+)
 
 # ── Configuración desacoplada ────────────────────────────────────────────────
 RABBIT_HOST        = os.getenv("RABBIT_HOST",        "localhost")
@@ -26,7 +40,37 @@ COLA_SOLICITUD      = os.getenv("COLA_SOLICITUD",      "gds15.solicitud")
 EXCHANGE_EVENTOS    = os.getenv("EXCHANGE_EVENTOS",    "geriatricos.eventos")
 EVENTO_GUARDADO_RK  = "gds15.resultado.guardado"
 
-DB_PATH             = os.getenv("DB_PATH",            "gds15.db")
+# ── Conexión a MySQL ──────────────────────────────────────────────────────────
+DB_HOST     = os.getenv("DB_HOST",     "localhost")
+DB_PORT     = os.getenv("DB_PORT",     "3306")
+DB_USER     = os.getenv("DB_USER",     "root")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "")
+DB_NAME     = os.getenv("DB_NAME",     "gds15")
+
+DB_URL = os.getenv(
+    "DB_URL",
+    f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}?charset=utf8mb4",
+)
+
+# pool_pre_ping evita el error clásico "MySQL server has gone away" cuando la
+# conexión lleva rato inactiva (normal en un servicio que solo persiste cada
+# vez que llega un mensaje de RabbitMQ).
+engine = create_engine(DB_URL, pool_size=5, max_overflow=10, pool_pre_ping=True)
+
+metadata = MetaData()
+
+resultados = Table(
+    "resultados", metadata,
+    Column("id",              Integer, primary_key=True, autoincrement=True),
+    Column("usuario",         String(100),  nullable=False),
+    Column("doctor_id",       String(100)),
+    Column("fecha_prueba",    String(40),   nullable=False),
+    Column("respuestas_bits", Integer,      nullable=False),
+    Column("puntaje",         Integer,      nullable=False),
+    Column("nivel",           String(60),   nullable=False),
+    Column("descripcion",     Text,         nullable=False),
+    Column("fecha_registro",  String(40),   nullable=False),
+)
 
 # ── Esquema del mensaje de entrada (documentado) ──────────────────────────────
 # {
@@ -68,50 +112,47 @@ def interpretar(puntaje: int):
 
 # ── Base de datos ─────────────────────────────────────────────────────────────
 def init_db():
-    con = sqlite3.connect(DB_PATH)
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS resultados (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            usuario         TEXT    NOT NULL,
-            doctor_id       TEXT,
-            fecha_prueba    TEXT    NOT NULL,
-            respuestas_bits INTEGER NOT NULL,
-            puntaje         INTEGER NOT NULL,
-            nivel           TEXT    NOT NULL,
-            descripcion     TEXT    NOT NULL,
-            fecha_registro  TEXT    NOT NULL
-        )
-    """)
-    con.commit()
-    con.close()
+    """Crea la tabla 'resultados' si no existe. Requiere que la BASE DE DATOS
+    (schema) ya exista en MySQL — SQLAlchemy crea tablas, no el schema.
+    Ver instrucciones para crear la base con CREATE DATABASE."""
+    metadata.create_all(engine)
 
 def guardar(usuario, doctor_id, fecha_prueba, respuestas_bits, puntaje, nivel, desc):
-    con = sqlite3.connect(DB_PATH)
-    cur = con.execute("""
-        INSERT INTO resultados
-          (usuario, doctor_id, fecha_prueba, respuestas_bits,
-           puntaje, nivel, descripcion, fecha_registro)
-        VALUES (?,?,?,?,?,?,?,?)
-    """, (usuario, doctor_id, fecha_prueba, respuestas_bits,
-          puntaje, nivel, desc, datetime.now(timezone.utc).isoformat()))
-    con.commit()
-    id_insertado = cur.lastrowid
-    con.close()
-    return id_insertado
+    with engine.begin() as con:
+        result = con.execute(
+            insert(resultados).values(
+                usuario=usuario,
+                doctor_id=doctor_id,
+                fecha_prueba=fecha_prueba,
+                respuestas_bits=respuestas_bits,
+                puntaje=puntaje,
+                nivel=nivel,
+                descripcion=desc,
+                fecha_registro=datetime.now(timezone.utc).isoformat(),
+            )
+        )
+        return result.inserted_primary_key[0]
 
 def consultar_historico(usuario, fecha_inicio, fecha_fin) -> list:
-    con = sqlite3.connect(DB_PATH)
-    cur = con.execute("""
-    SELECT id, usuario, doctor_id, fecha_prueba, puntaje, nivel, descripcion
-          FROM resultados
-         WHERE usuario = ?
-           AND fecha_prueba BETWEEN ? AND ?
-         ORDER BY fecha_prueba
-    """, (usuario, fecha_inicio, fecha_fin))
-    cols = [d[0] for d in cur.description]
-    rows = [dict(zip(cols, row)) for row in cur.fetchall()]
-    con.close()
-    return rows
+    stmt = (
+        select(
+            resultados.c.id,
+            resultados.c.usuario,
+            resultados.c.doctor_id,
+            resultados.c.fecha_prueba,
+            resultados.c.puntaje,
+            resultados.c.nivel,
+            resultados.c.descripcion,
+        )
+        .where(
+            resultados.c.usuario == usuario,
+            resultados.c.fecha_prueba.between(fecha_inicio, fecha_fin),
+        )
+        .order_by(resultados.c.fecha_prueba)
+    )
+    with engine.connect() as con:
+        filas = con.execute(stmt).mappings().all()
+        return [dict(f) for f in filas]
 
 # ── Publish/Subscribe: anunciar eventos de negocio ────────────────────────────
 def publicar_evento(ch, id_test, usuario, puntaje, nivel, fecha_prueba):
@@ -200,7 +241,13 @@ def on_mensaje(ch, method, props, body):
 
 # ── Arranque ──────────────────────────────────────────────────────────────────
 def main():
-    init_db()
+    try:
+        init_db()
+    except Exception as e:
+        print(f"[!] No se pudo conectar/crear la tabla en MySQL: {e}")
+        print(f"    Revisa DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_NAME y que la base '{DB_NAME}' exista.")
+        return
+
     conn    = pika.BlockingConnection(pika.ConnectionParameters(RABBIT_HOST))
     channel = conn.channel()
 
@@ -213,6 +260,7 @@ def main():
 
     print(f"[✓] GDS-15 service escuchando en '{RABBIT_HOST}', cola '{COLA_SOLICITUD}'")
     print(f"    (publicará eventos en exchange '{EXCHANGE_EVENTOS}' con routing_key '{EVENTO_GUARDADO_RK}')")
+    print(f"    BD: MySQL '{DB_NAME}' en {DB_HOST}:{DB_PORT} (usuario '{DB_USER}')")
     channel.start_consuming()
 
 if __name__ == "__main__":

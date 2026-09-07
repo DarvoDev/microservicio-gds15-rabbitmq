@@ -44,7 +44,12 @@ python3 interfaz.py        # 3. cada vez que un usuario lo use
 | `RABBIT_HOST` | `localhost` | Host del broker RabbitMQ |
 | `COLA_SOLICITUD` | `gds15.solicitud` | Cola creada por `intermediario.py` |
 | `EXCHANGE_EVENTOS` | `geriatricos.eventos` | Exchange creado por `intermediario.py` |
-| `DB_PATH` | `gds15.db` | Ruta del archivo SQLite |
+| `DB_HOST` | `localhost` | Host del servidor MySQL |
+| `DB_PORT` | `3306` | Puerto de MySQL |
+| `DB_USER` | `root` | Usuario de MySQL |
+| `DB_PASSWORD` | `""` | Contraseña del usuario de MySQL |
+| `DB_NAME` | `gds15` | Nombre de la base de datos (debe existir de antemano) |
+| `DB_URL` | *(vacío)* | Si se define, sobreescribe las 5 variables anteriores. Formato: `mysql+pymysql://usuario:clave@host:puerto/nombre_bd?charset=utf8mb4` |
 
 ### `interfaz.py`
 | Variable | Default | Descripción |
@@ -211,21 +216,23 @@ Se devuelve cuando falta un campo obligatorio, `tipo` es desconocido, o cualquie
 
 ---
 
-## 6. Persistencia (SQLite)
+## 6. Persistencia (MySQL)
 
-Tabla `resultados`, creada por `init_db()` en `service.py`:
+Tabla `resultados`, creada por `init_db()` en `service.py` vía SQLAlchemy (`metadata.create_all`). La **base de datos** (schema) debe existir de antemano; SQLAlchemy solo crea la tabla dentro de ella.
 
 | Columna | Tipo | Nulo | Descripción |
 |---|---|---|---|
-| `id` | `INTEGER PK AUTOINCREMENT` | No | ID interno |
-| `usuario` | `TEXT` | No | Paciente |
-| `doctor_id` | `TEXT` | Sí | Geriatra |
-| `fecha_prueba` | `TEXT` | No | Fecha clínica de aplicación |
+| `id` | `INTEGER PK AUTO_INCREMENT` | No | ID interno |
+| `usuario` | `VARCHAR(100)` | No | Paciente |
+| `doctor_id` | `VARCHAR(100)` | Sí | Geriatra |
+| `fecha_prueba` | `VARCHAR(40)` | No | Fecha clínica de aplicación |
 | `respuestas_bits` | `INTEGER` | No | Respuestas codificadas |
 | `puntaje` | `INTEGER` | No | Puntaje 0–15 |
-| `nivel` | `TEXT` | No | Nivel clínico |
+| `nivel` | `VARCHAR(60)` | No | Nivel clínico |
 | `descripcion` | `TEXT` | No | Descripción del nivel |
-| `fecha_registro` | `TEXT` | No | Timestamp UTC de inserción en el sistema |
+| `fecha_registro` | `VARCHAR(40)` | No | Timestamp UTC de inserción en el sistema |
+
+> El contrato JSON de entrada/salida (secciones 3 y 4) **no cambió** al migrar de SQLite a MySQL — solo cambió cómo se persiste internamente en `service.py`.
 
 ---
 

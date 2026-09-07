@@ -10,7 +10,7 @@ El sistema forma parte de una arquitectura mayor de microservicios de tests geri
 ## 1. ¿Qué hace?
 
 - **Aplica el test**: recopila las 15 respuestas del paciente, calcula el puntaje (0–15) y lo clasifica clínicamente (`Normal` o `Presencia de síntomas depresivos`).
-- **Guarda el resultado**: usuario, doctor, fecha, respuestas y puntaje quedan persistidos en una base de datos SQLite.
+- **Guarda el resultado**: usuario, doctor, fecha, respuestas y puntaje quedan persistidos en una base de datos **MySQL**.
 - **Consulta histórico**: permite ver todas las pruebas previas de un paciente y el detalle de cualquiera de ellas.
 - **Publica eventos**: cada resultado guardado se anuncia en un exchange de tipo publish/subscribe, para que otros servicios (auditoría, notificaciones, dashboards) puedan reaccionar sin acoplarse al flujo principal.
 
@@ -44,8 +44,9 @@ Para el detalle exacto de los mensajes JSON de entrada/salida y el esquema de la
 
 - **Python 3.11+** (se usa `int.bit_count()`, disponible desde Python 3.10)
 - **RabbitMQ** corriendo y accesible (local o remoto)
+- **MySQL 8+** corriendo y accesible (local o remoto)
 - Librería **`pika`** (cliente de RabbitMQ para Python)
-- SQLite — no requiere instalación aparte, viene incluido en la librería estándar de Python (`sqlite3`)
+- Librerías **`sqlalchemy`** y **`pymysql`** (acceso a MySQL desde Python)
 
 ### Instalar RabbitMQ
 
@@ -128,12 +129,110 @@ RabbitMQ corre sobre Erlang, así que primero hay que instalar Erlang y después
 
 > **Nota:** si usas WSL2 para correr Python (en vez de Python nativo de Windows), y RabbitMQ corre en Windows (no en Docker dentro de WSL), usa `RABBIT_HOST=localhost` normalmente — WSL2 resuelve `localhost` hacia Windows automáticamente en versiones recientes. Si no te conecta, usa la IP de tu máquina Windows en la red local en vez de `localhost`.
 
+### Instalar MySQL
+
+#### macOS / Linux
+
+**Opción A — Docker (recomendada):**
+
+```bash
+docker run -d --name mysql-gds15 \
+  -e MYSQL_ROOT_PASSWORD=changeme \
+  -e MYSQL_DATABASE=gds15 \
+  -p 3306:3306 \
+  mysql:8.0
+```
+
+- `MYSQL_ROOT_PASSWORD` → contraseña del usuario `root` (cámbiala por algo tuyo)
+- `MYSQL_DATABASE=gds15` → crea automáticamente la base de datos `gds15` al arrancar el contenedor, así te ahorras el paso manual de `CREATE DATABASE`
+- `3306` → puerto estándar de MySQL
+
+Verifica que quedó corriendo (puede tardar 10-20 segundos en estar listo la primera vez):
+
+```bash
+docker ps
+docker logs mysql-gds15
+```
+
+**Opción B — instalación nativa (Ubuntu/Debian):**
+
+```bash
+sudo apt update
+sudo apt install mysql-server -y
+sudo systemctl enable mysql
+sudo systemctl start mysql
+sudo mysql_secure_installation   # configura la contraseña de root, etc.
+```
+
+Luego crea la base de datos:
+
+```bash
+sudo mysql -u root -p
+```
+
+```sql
+CREATE DATABASE gds15 CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+EXIT;
+```
+
+**macOS con Homebrew:**
+
+```bash
+brew install mysql
+brew services start mysql
+mysql -u root
+```
+
+```sql
+CREATE DATABASE gds15 CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+EXIT;
+```
+
+#### Windows
+
+**Opción A — Docker Desktop (recomendada, más simple):**
+
+```powershell
+docker run -d --name mysql-gds15 -e MYSQL_ROOT_PASSWORD=changeme -e MYSQL_DATABASE=gds15 -p 3306:3306 mysql:8.0
+```
+
+Verifica:
+
+```powershell
+docker ps
+docker logs mysql-gds15
+```
+
+**Opción B — instalación nativa en Windows:**
+
+1. Descarga el **MySQL Installer** desde:
+   `https://dev.mysql.com/downloads/installer/`
+
+2. Ejecuta el instalador, elige **"Server only"** o **"Developer Default"**, y sigue el asistente. Cuando te pida configurar la contraseña de `root`, guárdala — la vas a necesitar en `DB_PASSWORD`.
+
+3. El instalador registra MySQL como **servicio de Windows** e inicia automáticamente. Verifícalo en:
+
+   ```powershell
+   services.msc
+   ```
+
+   buscando "MySQL80" (o similar) — debe decir "En ejecución".
+
+4. Abre **"MySQL 8.0 Command Line Client"** desde el menú de inicio (te pedirá la contraseña de root) y crea la base de datos:
+
+   ```sql
+   CREATE DATABASE gds15 CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+   EXIT;
+   ```
+
+> **Nota:** si eliges la Opción B (instalación nativa) en cualquier sistema operativo, siempre tienes que crear la base de datos `gds15` a mano con `CREATE DATABASE` antes de correr `service.py` — a diferencia de la imagen Docker con `MYSQL_DATABASE=gds15`, que la crea sola.
+
 ### Instalar dependencias de Python
 
 **macOS / Linux:**
 
 ```bash
-pip install pika --break-system-packages
+pip install pika sqlalchemy pymysql cryptography --break-system-packages
 ```
 
 (si usas un entorno virtual, omite la bandera `--break-system-packages`)
@@ -141,13 +240,13 @@ pip install pika --break-system-packages
 **Windows:**
 
 ```powershell
-pip install pika
+pip install pika sqlalchemy pymysql cryptography
 ```
 
 Si tienes varias versiones de Python instaladas y `pip` no apunta a la correcta, usa:
 
 ```powershell
-py -m pip install pika
+py -m pip install pika sqlalchemy pymysql cryptography
 ```
 
 Se recomienda usar un entorno virtual para no mezclar dependencias con otros proyectos:
@@ -155,8 +254,10 @@ Se recomienda usar un entorno virtual para no mezclar dependencias con otros pro
 ```powershell
 python -m venv venv
 venv\Scripts\activate
-pip install pika
+pip install pika sqlalchemy pymysql cryptography
 ```
+
+> `pymysql` es el driver que SQLAlchemy usa para hablar con MySQL desde Python. `cryptography` es necesaria porque MySQL 8 usa por defecto el plugin de autenticación `caching_sha2_password`, que la requiere.
 
 ---
 
@@ -218,28 +319,40 @@ Todas las variables tienen un valor por defecto pensado para correr todo en `loc
 | `COLA_SOLICITUD` | `intermediario.py`, `service.py` | `gds15.solicitud` | Cola donde `service.py` consume |
 | `EXCHANGE_EVENTOS` | `intermediario.py`, `service.py` | `geriatricos.eventos` | Exchange `topic` para publish/subscribe de eventos |
 | `COLA_RESPUESTAS` | `interfaz.py` | `gds15.resultados.<hostname>` | Cola exclusiva de respuestas de cada instancia de la interfaz |
-| `DB_PATH` | `service.py` | `gds15.db` | Ruta del archivo SQLite donde se guardan los resultados |
+| `DB_HOST` | `service.py` | `localhost` | Host del servidor MySQL |
+| `DB_PORT` | `service.py` | `3306` | Puerto de MySQL |
+| `DB_USER` | `service.py` | `root` | Usuario de MySQL |
+| `DB_PASSWORD` | `service.py` | `""` | Contraseña del usuario de MySQL |
+| `DB_NAME` | `service.py` | `gds15` | Nombre de la base de datos (debe existir de antemano) |
+| `DB_URL` | `service.py` | *(vacío)* | Si se define, sobreescribe las 5 variables de `DB_*` anteriores. Formato: `mysql+pymysql://usuario:clave@host:puerto/nombre_bd?charset=utf8mb4` |
 
 Ejemplo de uso con variables personalizadas:
 
 **macOS / Linux:**
 
 ```bash
-RABBIT_HOST=192.168.1.50 DB_PATH=/datos/gds15.db python3 service.py
+RABBIT_HOST=192.168.1.50 DB_HOST=192.168.1.60 DB_PASSWORD=changeme python3 service.py
 ```
 
 **Windows (PowerShell):**
 
 ```powershell
-$env:RABBIT_HOST="192.168.1.50"; $env:DB_PATH="C:\datos\gds15.db"; python service.py
+$env:RABBIT_HOST="192.168.1.50"; $env:DB_HOST="192.168.1.60"; $env:DB_PASSWORD="changeme"; python service.py
 ```
 
 **Windows (CMD):**
 
 ```cmd
 set RABBIT_HOST=192.168.1.50
-set DB_PATH=C:\datos\gds15.db
+set DB_HOST=192.168.1.60
+set DB_PASSWORD=changeme
 python service.py
+```
+
+Alternativamente, si prefieres una sola variable en vez de cinco:
+
+```bash
+DB_URL="mysql+pymysql://root:changeme@192.168.1.60:3306/gds15?charset=utf8mb4" python3 service.py
 ```
 
 > **Importante:** `EXCHANGE_SOLICITUD` y `ROUTING_KEY_GDS15` deben tener el **mismo valor** en `intermediario.py` y en `interfaz.py`, o los mensajes nunca llegarán a `service.py`.
@@ -254,23 +367,32 @@ python service.py
 ├── service.py            # Lógica de negocio + persistencia + RPC
 ├── interfaz.py            # Cliente de línea de comandos
 ├── CONTRATO_GDS15.md     # Contrato JSON detallado de entrada/salida/eventos
-├── gds15.db               # Base de datos SQLite (se crea automáticamente)
 └── README.md               # Este archivo
+
+(La base de datos vive en el servidor MySQL, no en un archivo local — ver sección 3.)
 ```
 
 ---
 
 ## 7. Verificar que todo funciona
 
-1. Con RabbitMQ corriendo, entra a `http://localhost:15672` y confirma en la pestaña **Exchanges** que existen `geriatricos.solicitudes` y `geriatricos.eventos` después de correr `intermediario.py`.
-2. Corre `service.py` en una terminal — debe imprimir que quedó escuchando en la cola `gds15.solicitud`.
-3. Corre `interfaz.py` en otra terminal, elige `[1] Aplicar test`, responde las preguntas y confirma que recibes el puntaje.
-4. Vuelve a correr `interfaz.py`, elige `[2] Consultar histórico` con el mismo nombre de usuario, y confirma que aparece el registro que acabas de crear.
+1. Con MySQL corriendo, confirma que la base `gds15` existe (`SHOW DATABASES;` en el cliente de MySQL).
+2. Con RabbitMQ corriendo, entra a `http://localhost:15672` y confirma en la pestaña **Exchanges** que existen `geriatricos.solicitudes` y `geriatricos.eventos` después de correr `intermediario.py`.
+3. Corre `service.py` en una terminal — debe imprimir que quedó escuchando en la cola `gds15.solicitud` y que se conectó a MySQL (`BD: MySQL 'gds15' en ...`). Si falla la conexión a MySQL, lo dice explícitamente y no intenta arrancar RabbitMQ.
+4. Corre `interfaz.py` en otra terminal, elige `[1] Aplicar test`, responde las preguntas y confirma que recibes el puntaje.
+5. Vuelve a correr `interfaz.py`, elige `[2] Consultar histórico` con el mismo nombre de usuario, y confirma que aparece el registro que acabas de crear.
+6. Opcional: conéctate directo a MySQL y revisa la tabla:
+
+   ```sql
+   USE gds15;
+   SELECT * FROM resultados;
+   ```
 
 ---
 
 ## 8. Notas y próximos pasos
 
-- Actualmente la persistencia es **SQLite**, pensada para desarrollo/pruebas locales. Para integrarse al resto del sistema de microservicios (que usa MySQL), se recomienda migrar a SQLAlchemy + MySQL manteniendo el mismo contrato de mensajes.
-- La validación de mensajes es manual (`validar_mensaje` en `service.py`). Si se integra con el resto del proyecto, se recomienda migrar a validación con **Pydantic**, como usan los demás microservicios (Katz, Lawton, SPPB, MiniCog).
+- La persistencia usa **MySQL vía SQLAlchemy** (Core, sin ORM completo) — mismo motor que el resto de los microservicios del proyecto (Katz, Lawton, SPPB, MiniCog).
+- La tabla se crea automáticamente al arrancar `service.py` (`metadata.create_all`), pero la **base de datos** (schema) debe existir de antemano — ver sección de instalación de MySQL. Para un entorno de producción con varios desarrolladores, se recomienda pasar a migraciones con **Alembic** en vez de `create_all`.
+- La validación de mensajes es manual (`validar_mensaje` en `service.py`). Si se integra con el resto del proyecto, se recomienda migrar a validación con **Pydantic**, como usan los demás microservicios.
 - El detalle completo del contrato JSON (campos, tipos, ejemplos) está en [`CONTRATO_GDS15.md`](./CONTRATO_GDS15.md).
