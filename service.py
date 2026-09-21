@@ -98,7 +98,7 @@ def validar_mensaje(msg: dict):
     return tipo
 
 # ── Lógica de negocio (sin cambios respecto a tu original) ───────────────────
-RESPUESTAS_PUNTUADAS = 0b110_1011_1011_1110
+RESPUESTAS_PUNTUADAS = 0b110_1011_1010_1110
 MASCARA = (1 << 15) - 1
 
 def calcular_puntaje(bits: int) -> int:

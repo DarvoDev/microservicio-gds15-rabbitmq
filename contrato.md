@@ -241,7 +241,7 @@ Tabla `resultados`, creada por `init_db()` en `service.py` vía SQLAlchemy (`met
 Constante de referencia en `service.py`:
 
 ```python
-RESPUESTAS_PUNTUADAS = 0b110_1011_1011_1110
+RESPUESTAS_PUNTUADAS = 0b110_1011_1010_1110
 MASCARA = (1 << 15) - 1
 ```
 
