@@ -32,11 +32,11 @@ interfaz.py ──publish──▶ [ EXCHANGE_SOLICITUD (direct) ] ──routing
 
 | Archivo | Rol |
 |---|---|
-| **`intermediario.py`** | Declara toda la infraestructura de mensajería (exchanges, cola, binding). Se ejecuta **una sola vez** antes que los demás. No contiene lógica de negocio ni de interfaz. |
-| **`service.py`** | El microservicio en sí: consume solicitudes, calcula el puntaje, valida el mensaje, persiste en SQLite y responde vía RPC. También publica eventos de negocio. |
+| **`indermediario.py`** | Declara toda la infraestructura de mensajería (exchanges, cola, binding). Se ejecuta **una sola vez** antes que los demás. No contiene lógica de negocio ni de interfaz. |
+| **`service.py`** | El microservicio en sí: consume solicitudes, calcula el puntaje, valida el mensaje, persiste en MySQL y responde vía RPC. También publica eventos de negocio. |
 | **`interfaz.py`** | Cliente de línea de comandos: hace las preguntas al usuario, arma el mensaje, lo publica y espera la respuesta. |
 
-Para el detalle exacto de los mensajes JSON de entrada/salida y el esquema de la base de datos, ver [`CONTRATO_GDS15.md`](./CONTRATO_GDS15.md).
+Para el detalle exacto de los mensajes JSON de entrada/salida y el esquema de la base de datos, ver [`contrato.md`](./contrato.md).
 
 ---
 
@@ -263,13 +263,15 @@ pip install pika sqlalchemy pymysql cryptography
 
 ## 4. Cómo usarlo
 
+> Guía paso a paso para Windows + Docker (con puertos alternativos y solución de errores comunes): ver [`EJECUCION.md`](./EJECUCION.md).
+
 El **orden de ejecución importa**: el intermediario debe existir antes de que el servicio o la interfaz intenten usarlo.
 
 **macOS / Linux:**
 
 ```bash
 # 1. Levantar la infraestructura de mensajería (una sola vez)
-python3 intermediario.py
+python3 indermediario.py
 
 # 2. Levantar el servicio (queda corriendo, escuchando solicitudes)
 python3 service.py
@@ -282,7 +284,7 @@ python3 interfaz.py
 
 ```powershell
 # 1. Levantar la infraestructura de mensajería (una sola vez)
-python intermediario.py
+python indermediario.py
 
 # 2. Levantar el servicio (queda corriendo, escuchando solicitudes)
 python service.py
@@ -291,19 +293,37 @@ python service.py
 python interfaz.py
 ```
 
-> En Windows, si el comando `python` no se reconoce, prueba con `py` en su lugar (`py intermediario.py`, `py service.py`, `py interfaz.py`).
+> En Windows, si el comando `python` no se reconoce, prueba con `py` en su lugar (`py indermediario.py`, `py service.py`, `py interfaz.py`).
 
 Cada uno de estos comandos debe correr en su **propia ventana/terminal**, ya que `service.py` y (mientras espera respuesta) `interfaz.py` quedan bloqueados escuchando. En Windows puedes abrir varias ventanas de PowerShell, o usar Windows Terminal con pestañas.
 
-Si `service.py` o `interfaz.py` se ejecutan antes que `intermediario.py`, fallarán porque la cola/exchange todavía no existen — es intencional, para forzar el orden correcto.
+Si `service.py` o `interfaz.py` se ejecutan antes que `indermediario.py`, fallarán porque la cola/exchange todavía no existen — es intencional, para forzar el orden correcto.
 
 ### Flujo típico
 
-1. Corres `intermediario.py` una vez al desplegar el sistema.
+1. Corres `indermediario.py` una vez al desplegar el sistema.
 2. Dejas `service.py` corriendo en segundo plano (o en un contenedor/servicio del sistema operativo).
 3. Cada usuario (doctor/geriatra) ejecuta `interfaz.py` y elige:
    - **`[1] Aplicar test`** → responde las 15 preguntas SI/NO, ingresa el usuario (paciente) y el ID del doctor, y recibe el puntaje e interpretación al instante.
    - **`[2] Consultar histórico`** → ingresa el nombre del paciente y ve la lista de pruebas previas, con opción de ver el detalle de una en particular.
+
+### Ejecutar de nuevo (segunda vez en adelante)
+
+Los contenedores ya existen, así que **no** se repite `docker run` ni `indermediario.py` (los exchanges y la cola persisten en RabbitMQ):
+
+1. Arrancar los contenedores — desde Docker Desktop (botón **▶ Start** de cada uno) o por consola:
+
+   ```powershell
+   docker start rabbitmq mysql-gds15
+   ```
+
+2. Esperar unos segundos a que MySQL esté listo.
+3. Terminal 1: activar el entorno virtual, definir las variables de entorno de la BD y correr `service.py`.
+4. Terminal 2: activar el entorno virtual y correr `interfaz.py`.
+
+> Las variables definidas con `$env:` (PowerShell) o `set` (CMD) se pierden al cerrar la terminal: hay que volver a definirlas cada vez.
+>
+> En Docker Desktop usa **Start/Stop**, no la papelera: borrar el contenedor de MySQL borra también los datos guardados (no se creó con volumen). Si borras el de RabbitMQ, hay que volver a correr `indermediario.py`.
 
 ---
 
@@ -314,10 +334,10 @@ Todas las variables tienen un valor por defecto pensado para correr todo en `loc
 | Variable | Usada en | Default | Descripción |
 |---|---|---|---|
 | `RABBIT_HOST` | los 3 archivos | `localhost` | Host del broker RabbitMQ |
-| `EXCHANGE_SOLICITUD` | `intermediario.py`, `interfaz.py` | `geriatricos.solicitudes` | Exchange `direct`, intermediario de solicitudes |
-| `ROUTING_KEY_GDS15` | `intermediario.py`, `interfaz.py` | `gds15` | Routing key propia de este test |
-| `COLA_SOLICITUD` | `intermediario.py`, `service.py` | `gds15.solicitud` | Cola donde `service.py` consume |
-| `EXCHANGE_EVENTOS` | `intermediario.py`, `service.py` | `geriatricos.eventos` | Exchange `topic` para publish/subscribe de eventos |
+| `EXCHANGE_SOLICITUD` | `indermediario.py`, `interfaz.py` | `geriatricos.solicitudes` | Exchange `direct`, intermediario de solicitudes |
+| `ROUTING_KEY_GDS15` | `indermediario.py`, `interfaz.py` | `gds15` | Routing key propia de este test |
+| `COLA_SOLICITUD` | `indermediario.py`, `service.py` | `gds15.solicitud` | Cola donde `service.py` consume |
+| `EXCHANGE_EVENTOS` | `indermediario.py`, `service.py` | `geriatricos.eventos` | Exchange `topic` para publish/subscribe de eventos |
 | `COLA_RESPUESTAS` | `interfaz.py` | `gds15.resultados.<hostname>` | Cola exclusiva de respuestas de cada instancia de la interfaz |
 | `DB_HOST` | `service.py` | `localhost` | Host del servidor MySQL |
 | `DB_PORT` | `service.py` | `3306` | Puerto de MySQL |
@@ -355,7 +375,7 @@ Alternativamente, si prefieres una sola variable en vez de cinco:
 DB_URL="mysql+pymysql://root:changeme@192.168.1.60:3306/gds15?charset=utf8mb4" python3 service.py
 ```
 
-> **Importante:** `EXCHANGE_SOLICITUD` y `ROUTING_KEY_GDS15` deben tener el **mismo valor** en `intermediario.py` y en `interfaz.py`, o los mensajes nunca llegarán a `service.py`.
+> **Importante:** `EXCHANGE_SOLICITUD` y `ROUTING_KEY_GDS15` deben tener el **mismo valor** en `indermediario.py` y en `interfaz.py`, o los mensajes nunca llegarán a `service.py`.
 
 ---
 
@@ -363,10 +383,11 @@ DB_URL="mysql+pymysql://root:changeme@192.168.1.60:3306/gds15?charset=utf8mb4" p
 
 ```
 .
-├── intermediario.py     # Declara exchanges, cola y binding (correr primero)
+├── indermediario.py     # Declara exchanges, cola y binding (correr primero)
 ├── service.py            # Lógica de negocio + persistencia + RPC
 ├── interfaz.py            # Cliente de línea de comandos
-├── CONTRATO_GDS15.md     # Contrato JSON detallado de entrada/salida/eventos
+├── contrato.md            # Contrato JSON detallado de entrada/salida/eventos
+├── EJECUCION.md           # Guía paso a paso (Windows + Docker) y solución de problemas
 └── README.md               # Este archivo
 
 (La base de datos vive en el servidor MySQL, no en un archivo local — ver sección 3.)
@@ -377,7 +398,7 @@ DB_URL="mysql+pymysql://root:changeme@192.168.1.60:3306/gds15?charset=utf8mb4" p
 ## 7. Verificar que todo funciona
 
 1. Con MySQL corriendo, confirma que la base `gds15` existe (`SHOW DATABASES;` en el cliente de MySQL).
-2. Con RabbitMQ corriendo, entra a `http://localhost:15672` y confirma en la pestaña **Exchanges** que existen `geriatricos.solicitudes` y `geriatricos.eventos` después de correr `intermediario.py`.
+2. Con RabbitMQ corriendo, entra a `http://localhost:15672` y confirma en la pestaña **Exchanges** que existen `geriatricos.solicitudes` y `geriatricos.eventos` después de correr `indermediario.py`.
 3. Corre `service.py` en una terminal — debe imprimir que quedó escuchando en la cola `gds15.solicitud` y que se conectó a MySQL (`BD: MySQL 'gds15' en ...`). Si falla la conexión a MySQL, lo dice explícitamente y no intenta arrancar RabbitMQ.
 4. Corre `interfaz.py` en otra terminal, elige `[1] Aplicar test`, responde las preguntas y confirma que recibes el puntaje.
 5. Vuelve a correr `interfaz.py`, elige `[2] Consultar histórico` con el mismo nombre de usuario, y confirma que aparece el registro que acabas de crear.
@@ -390,9 +411,25 @@ DB_URL="mysql+pymysql://root:changeme@192.168.1.60:3306/gds15?charset=utf8mb4" p
 
 ---
 
-## 8. Notas y próximos pasos
+## 8. Problemas comunes
+
+| Síntoma | Causa | Solución |
+|---|---|---|
+| `ports are not available ... bind: Only one usage of each socket address` | El puerto (3306, 8080, ...) ya lo usa otro programa, p. ej. un MySQL nativo de Windows. El contenedor queda creado pero detenido. | `docker rm <nombre>` y recrearlo con otro puerto externo, p. ej. `-p 3307:3306`. En ese caso define `DB_PORT=3307` al correr `service.py`. |
+| `Conflict. The container name "/xxx" is already in use` | Ya existe un contenedor con ese nombre (aunque haya fallado al arrancar). | `docker start xxx` si estaba bien, o `docker rm xxx` y volver a crearlo. |
+| `Access denied for user 'root'@'localhost'` | `service.py` se conecta al MySQL equivocado o con contraseña incorrecta. | Revisar `DB_PORT` y `DB_PASSWORD` en esa terminal. |
+| `Can't connect to MySQL server` | MySQL aún inicializando o contenedor detenido. | `docker logs --tail 5 mysql-gds15` (esperar `ready for connections ... port: 3306`) / `docker start mysql-gds15`. |
+| `NOT_FOUND - no queue 'gds15.solicitud'` | No se corrió `indermediario.py` o se recreó RabbitMQ. | `python indermediario.py`. |
+| `interfaz.py` se queda esperando | `service.py` no está corriendo o falló. | Revisar la terminal del servicio. |
+| `venv\Scripts\activate` bloqueado | Política de ejecución de PowerShell. | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` |
+
+Más detalle en [`EJECUCION.md`](./EJECUCION.md).
+
+---
+
+## 9. Notas y próximos pasos
 
 - La persistencia usa **MySQL vía SQLAlchemy** (Core, sin ORM completo) — mismo motor que el resto de los microservicios del proyecto (Katz, Lawton, SPPB, MiniCog).
 - La tabla se crea automáticamente al arrancar `service.py` (`metadata.create_all`), pero la **base de datos** (schema) debe existir de antemano — ver sección de instalación de MySQL. Para un entorno de producción con varios desarrolladores, se recomienda pasar a migraciones con **Alembic** en vez de `create_all`.
 - La validación de mensajes es manual (`validar_mensaje` en `service.py`). Si se integra con el resto del proyecto, se recomienda migrar a validación con **Pydantic**, como usan los demás microservicios.
-- El detalle completo del contrato JSON (campos, tipos, ejemplos) está en [`CONTRATO_GDS15.md`](./CONTRATO_GDS15.md).
+- El detalle completo del contrato JSON (campos, tipos, ejemplos) está en [`contrato.md`](./contrato.md).
