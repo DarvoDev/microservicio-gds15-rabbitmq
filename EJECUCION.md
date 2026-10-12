@@ -88,7 +88,7 @@ venv\Scripts\activate
 python .\interfaz.py
 ```
 
-- `[1] Aplicar test` → responder las 15 preguntas; devuelve puntaje e interpretación.
+- `[1] Aplicar test` → capturar UID del expediente, nombre del paciente y Doctor ID, y responder las 15 preguntas; devuelve puntaje e interpretación. Si el UID es nuevo, el paciente se da de alta solo.
 - `[2] Consultar histórico` → usar el mismo UID de expediente; debe aparecer el registro recién creado.
 
 ---

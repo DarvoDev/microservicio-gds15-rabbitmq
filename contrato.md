@@ -76,6 +76,8 @@ El paciente **no se identifica por nombre** (puede haber homónimos). Se manejan
 
 El `nombre` se envía en `aplicar_test` solo para mantener la tabla local de pacientes; si cambia en el expediente se actualiza. Nunca se usa para buscar.
 
+Los clientes siempre envían el `uid`, nunca el `paciente_id`: este último es interno del servicio y solo se devuelve como referencia. Ejemplo: el expediente `EXP-000123` puede corresponder al `paciente_id` `5`; quien consulte el histórico lo hace con `EXP-000123`. La explicación completa está en el [README](./README.md#identificación-del-paciente-uid-e-id).
+
 Es el mismo sobre en ambos casos (`aplicar_test` y `consultar_historico`); cambia qué campos son obligatorios.
 
 ### Campos comunes del sobre RPC

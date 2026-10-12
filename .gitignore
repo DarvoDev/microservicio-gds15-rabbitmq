@@ -1,3 +1,5 @@
 CarcamoBonifacioDavid_SS_R2.docx
 Documentancion MicroServicios TestsGeriatricos (1) (1).docx
 gds15.db
+*.docx
+__pycache__/

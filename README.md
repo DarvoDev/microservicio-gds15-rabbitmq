@@ -39,6 +39,26 @@ interfaz.py ──publish──▶ [ EXCHANGE_SOLICITUD (direct) ] ──routing
 
 Para el detalle exacto de los mensajes JSON de entrada/salida y el esquema de la base de datos, ver [`contrato.md`](./contrato.md).
 
+### Identificación del paciente: `uid` e `id`
+
+El paciente no se identifica por su nombre, porque dos personas pueden llamarse igual. Se manejan dos identificadores:
+
+| Identificador | Quién lo asigna | Para qué sirve |
+|---|---|---|
+| `uid` | La aplicación general del hospital (expediente) | Es único por paciente y es lo que viaja en los mensajes. Es lo que captura el geriatra en la interfaz. |
+| `id` (`paciente_id`) | MySQL, en la tabla `pacientes` de este servicio (`AUTO_INCREMENT`) | Llave interna. Cada resultado guarda este valor en `resultados.paciente_id`. Solo existe dentro de la base `gds15`. |
+
+El `nombre` se guarda solo como referencia para mostrarlo en el histórico; nunca se usa para buscar.
+
+Cuando llega un mensaje, `service.py` traduce el `uid` a su `id` interno:
+
+- **`aplicar_test`**: si el `uid` no existe da de alta al paciente; si ya existe, actualiza su nombre por si cambió en el expediente. Ambas cosas se hacen en una sola sentencia `INSERT … ON DUPLICATE KEY UPDATE`, así que dos solicitudes simultáneas no pueden duplicar un `uid`. Con el `id` obtenido se guarda el resultado.
+- **`consultar_historico`**: busca el `id` del `uid` y devuelve los resultados de ese `id`. Si el `uid` nunca se ha registrado, responde `paciente: null` y una lista vacía.
+
+Ejemplo: el expediente `EXP-000123` puede corresponder al `id` interno `5`. La interfaz y los demás servicios siempre usan `EXP-000123`; el `5` solo existe dentro de este servicio.
+
+Se separan para no depender del formato de la aplicación general: el `uid` es texto definido por el hospital (hasta 64 caracteres), mientras que el `id` es un entero compacto, más eficiente como llave foránea e índice. Además, los datos del paciente quedan en un solo lugar y cada resultado solo apunta a él.
+
 ---
 
 ## 3. Requisitos
