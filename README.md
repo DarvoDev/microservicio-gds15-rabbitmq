@@ -10,8 +10,9 @@ El sistema forma parte de una arquitectura mayor de microservicios de tests geri
 ## 1. ¿Qué hace?
 
 - **Aplica el test**: recopila las 15 respuestas del paciente, calcula el puntaje (0–15) y lo clasifica clínicamente (`Normal` o `Presencia de síntomas depresivos`).
-- **Guarda el resultado**: usuario, doctor, fecha, respuestas y puntaje quedan persistidos en una base de datos **MySQL**.
-- **Consulta histórico**: permite ver todas las pruebas previas de un paciente y el detalle de cualquiera de ellas.
+- **Guarda el resultado**: paciente, doctor, fecha, respuestas y puntaje quedan persistidos en una base de datos **MySQL**.
+- **Identifica al paciente por UID**: el paciente se identifica por el `uid` de su expediente en la aplicación general del hospital (no por nombre, ya que puede haber homónimos). El servicio mantiene una tabla local `pacientes` que mapea ese `uid` a un id interno propio.
+- **Consulta histórico**: a partir del `uid`, permite ver todas las pruebas previas de un paciente y el detalle de cualquiera de ellas.
 - **Publica eventos**: cada resultado guardado se anuncia en un exchange de tipo publish/subscribe, para que otros servicios (auditoría, notificaciones, dashboards) puedan reaccionar sin acoplarse al flujo principal.
 
 Toda la comunicación entre las partes se hace de forma **asíncrona vía RabbitMQ**, no por llamadas HTTP directas.
@@ -304,8 +305,8 @@ Si `service.py` o `interfaz.py` se ejecutan antes que `indermediario.py`, fallar
 1. Corres `indermediario.py` una vez al desplegar el sistema.
 2. Dejas `service.py` corriendo en segundo plano (o en un contenedor/servicio del sistema operativo).
 3. Cada usuario (doctor/geriatra) ejecuta `interfaz.py` y elige:
-   - **`[1] Aplicar test`** → responde las 15 preguntas SI/NO, ingresa el usuario (paciente) y el ID del doctor, y recibe el puntaje e interpretación al instante.
-   - **`[2] Consultar histórico`** → ingresa el nombre del paciente y ve la lista de pruebas previas, con opción de ver el detalle de una en particular.
+   - **`[1] Aplicar test`** → responde las 15 preguntas SI/NO, ingresa el UID del expediente y nombre del paciente y el ID del doctor, y recibe el puntaje e interpretación al instante.
+   - **`[2] Consultar histórico`** → ingresa el UID del expediente del paciente y ve la lista de pruebas previas, con opción de ver el detalle de una en particular.
 
 ### Ejecutar de nuevo (segunda vez en adelante)
 
@@ -401,11 +402,12 @@ DB_URL="mysql+pymysql://root:changeme@192.168.1.60:3306/gds15?charset=utf8mb4" p
 2. Con RabbitMQ corriendo, entra a `http://localhost:15672` y confirma en la pestaña **Exchanges** que existen `geriatricos.solicitudes` y `geriatricos.eventos` después de correr `indermediario.py`.
 3. Corre `service.py` en una terminal — debe imprimir que quedó escuchando en la cola `gds15.solicitud` y que se conectó a MySQL (`BD: MySQL 'gds15' en ...`). Si falla la conexión a MySQL, lo dice explícitamente y no intenta arrancar RabbitMQ.
 4. Corre `interfaz.py` en otra terminal, elige `[1] Aplicar test`, responde las preguntas y confirma que recibes el puntaje.
-5. Vuelve a correr `interfaz.py`, elige `[2] Consultar histórico` con el mismo nombre de usuario, y confirma que aparece el registro que acabas de crear.
+5. Vuelve a correr `interfaz.py`, elige `[2] Consultar histórico` con el mismo UID de expediente, y confirma que aparece el registro que acabas de crear.
 6. Opcional: conéctate directo a MySQL y revisa la tabla:
 
    ```sql
    USE gds15;
+   SELECT * FROM pacientes;
    SELECT * FROM resultados;
    ```
 
@@ -430,6 +432,6 @@ Más detalle en [`EJECUCION.md`](./EJECUCION.md).
 ## 9. Notas y próximos pasos
 
 - La persistencia usa **MySQL vía SQLAlchemy** (Core, sin ORM completo) — mismo motor que el resto de los microservicios del proyecto (Katz, Lawton, SPPB, MiniCog).
-- La tabla se crea automáticamente al arrancar `service.py` (`metadata.create_all`), pero la **base de datos** (schema) debe existir de antemano — ver sección de instalación de MySQL. Para un entorno de producción con varios desarrolladores, se recomienda pasar a migraciones con **Alembic** en vez de `create_all`.
+- Las tablas (`pacientes`, `resultados`) se crean automáticamente al arrancar `service.py` (`metadata.create_all`), pero la **base de datos** (schema) debe existir de antemano — ver sección de instalación de MySQL. Para un entorno de producción con varios desarrolladores, se recomienda pasar a migraciones con **Alembic** en vez de `create_all`.
 - La validación de mensajes es manual (`validar_mensaje` en `service.py`). Si se integra con el resto del proyecto, se recomienda migrar a validación con **Pydantic**, como usan los demás microservicios.
 - El detalle completo del contrato JSON (campos, tipos, ejemplos) está en [`contrato.md`](./contrato.md).

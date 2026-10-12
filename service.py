@@ -5,9 +5,15 @@
 # para dejar creada la topología de mensajería. Aquí solo nos conectamos a la
 # cola que el intermediario ya dejó lista.
 #
-# Persistencia: MySQL vía SQLAlchemy (antes SQLite). El contrato JSON de
-# entrada/salida NO cambia — interfaz.py e intermediario.py no requieren
-# ninguna modificación.
+# Persistencia: MySQL vía SQLAlchemy (antes SQLite).
+#
+# Identificación de pacientes: el paciente ya NO se identifica por nombre
+# (dos personas pueden llamarse igual). Se usa:
+#   - uid           -> identificador del expediente en la aplicación general
+#                      del hospital (viene en cada mensaje).
+#   - id (interno)  -> PK propia de este servicio en la tabla 'pacientes'.
+# Al recibir un uid se mapea a su id interno; los resultados se guardan
+# contra ese id interno (resultados.paciente_id).
 #
 # Variables de entorno (configurables):
 #   RABBIT_HOST        default: localhost
@@ -25,9 +31,10 @@ import os, json
 from datetime import datetime, timezone
 import pika
 from sqlalchemy import (
-    create_engine, MetaData, Table, Column,
-    Integer, String, Text, select, insert
+    create_engine, MetaData, Table, Column, ForeignKey,
+    Integer, String, Text, select, insert, inspect
 )
+from sqlalchemy.dialects.mysql import insert as mysql_insert
 
 # ── Configuración desacoplada ────────────────────────────────────────────────
 RABBIT_HOST        = os.getenv("RABBIT_HOST",        "localhost")
@@ -59,10 +66,22 @@ engine = create_engine(DB_URL, pool_size=5, max_overflow=10, pool_pre_ping=True)
 
 metadata = MetaData()
 
+# Tabla local de pacientes: mapea el uid del expediente del hospital a un id
+# interno de este servicio. El nombre se guarda solo como referencia y se
+# actualiza si cambia en el expediente; NUNCA se usa para buscar.
+pacientes = Table(
+    "pacientes", metadata,
+    Column("id",                  Integer,     primary_key=True, autoincrement=True),
+    Column("uid",                 String(64),  nullable=False, unique=True),
+    Column("nombre",              String(150), nullable=False),
+    Column("fecha_registro",      String(40),  nullable=False),
+    Column("fecha_actualizacion", String(40),  nullable=False),
+)
+
 resultados = Table(
     "resultados", metadata,
     Column("id",              Integer, primary_key=True, autoincrement=True),
-    Column("usuario",         String(100),  nullable=False),
+    Column("paciente_id",     Integer,      ForeignKey("pacientes.id"), nullable=False, index=True),
     Column("doctor_id",       String(100)),
     Column("fecha_prueba",    String(40),   nullable=False),
     Column("respuestas_bits", Integer,      nullable=False),
@@ -75,7 +94,8 @@ resultados = Table(
 # ── Esquema del mensaje de entrada (documentado) ──────────────────────────────
 # {
 #   "tipo":            "aplicar_test" | "consultar_historico",
-#   "usuario":         str   -> identificador del paciente (idPaciente)
+#   "uid":             str   -> uid del expediente del paciente (aplicación general)
+#   "nombre":          str   -> nombre del paciente (solo aplicar_test)
 #   "doctor_id":       str   -> identificador del geriatra  (idGeriatra)
 #   "fecha_prueba":    str   -> ISO 8601, fecha en que se aplicó el test
 #   "respuestas_bits": int   -> 15 respuestas codificadas en bits (solo aplicar_test)
@@ -86,13 +106,14 @@ resultados = Table(
 #   "reply_to":        str   -> cola exclusiva donde la interfaz espera la respuesta
 # }
 CAMPOS_OBLIGATORIOS = {
-    "aplicar_test":        ("usuario", "doctor_id", "fecha_prueba", "respuestas_bits"),
-    "consultar_historico": ("usuario",),
+    "aplicar_test":        ("uid", "nombre", "doctor_id", "fecha_prueba", "respuestas_bits"),
+    "consultar_historico": ("uid",),
 }
 
 def validar_mensaje(msg: dict):
     tipo = msg.get("tipo", "aplicar_test")
-    faltantes = [c for c in CAMPOS_OBLIGATORIOS.get(tipo, ()) if c not in msg]
+    faltantes = [c for c in CAMPOS_OBLIGATORIOS.get(tipo, ())
+                 if c not in msg or (isinstance(msg[c], str) and not msg[c].strip())]
     if faltantes:
         raise ValueError(f"Campos obligatorios faltantes para '{tipo}': {faltantes}")
     return tipo
@@ -112,16 +133,52 @@ def interpretar(puntaje: int):
 
 # ── Base de datos ─────────────────────────────────────────────────────────────
 def init_db():
-    """Crea la tabla 'resultados' si no existe. Requiere que la BASE DE DATOS
-    (schema) ya exista en MySQL — SQLAlchemy crea tablas, no el schema.
+    """Crea las tablas 'pacientes' y 'resultados' si no existen. Requiere que la
+    BASE DE DATOS (schema) ya exista en MySQL — SQLAlchemy crea tablas, no el schema.
     Ver instrucciones para crear la base con CREATE DATABASE."""
+    insp = inspect(engine)
+    if insp.has_table("resultados"):
+        columnas = {c["name"] for c in insp.get_columns("resultados")}
+        if "paciente_id" not in columnas:
+            # create_all no altera tablas existentes: la tabla vieja (por nombre)
+            # quedaría sin paciente_id. Se pide migrar a mano (ver contrato.md).
+            raise RuntimeError(
+                "La tabla 'resultados' tiene el esquema anterior (columna 'usuario'). "
+                "Renómbrala o elimínala antes de arrancar, p. ej.: "
+                "RENAME TABLE resultados TO resultados_legacy;"
+            )
     metadata.create_all(engine)
 
-def guardar(usuario, doctor_id, fecha_prueba, respuestas_bits, puntaje, nivel, desc):
+def obtener_o_crear_paciente(con, uid, nombre) -> int:
+    """Mapea uid del expediente -> id interno. Si el uid no existe lo da de alta;
+    si existe y el nombre cambió en el expediente, lo actualiza.
+    INSERT ... ON DUPLICATE KEY UPDATE es atómico, evita duplicados por uid."""
+    ahora = datetime.now(timezone.utc).isoformat()
+    stmt = mysql_insert(pacientes).values(
+        uid=uid, nombre=nombre, fecha_registro=ahora, fecha_actualizacion=ahora,
+    )
+    stmt = stmt.on_duplicate_key_update(
+        nombre=stmt.inserted.nombre,
+        fecha_actualizacion=stmt.inserted.fecha_actualizacion,
+    )
+    con.execute(stmt)
+    return con.execute(select(pacientes.c.id).where(pacientes.c.uid == uid)).scalar_one()
+
+def buscar_paciente(con, uid):
+    """Devuelve {id, uid, nombre} del paciente con ese uid, o None si no existe."""
+    fila = con.execute(
+        select(pacientes.c.id, pacientes.c.uid, pacientes.c.nombre)
+        .where(pacientes.c.uid == uid)
+    ).mappings().first()
+    return dict(fila) if fila else None
+
+def guardar(uid, nombre, doctor_id, fecha_prueba, respuestas_bits, puntaje, nivel, desc):
+    """Devuelve (id_test, paciente_id)."""
     with engine.begin() as con:
+        paciente_id = obtener_o_crear_paciente(con, uid, nombre)
         result = con.execute(
             insert(resultados).values(
-                usuario=usuario,
+                paciente_id=paciente_id,
                 doctor_id=doctor_id,
                 fecha_prueba=fecha_prueba,
                 respuestas_bits=respuestas_bits,
@@ -131,31 +188,35 @@ def guardar(usuario, doctor_id, fecha_prueba, respuestas_bits, puntaje, nivel, d
                 fecha_registro=datetime.now(timezone.utc).isoformat(),
             )
         )
-        return result.inserted_primary_key[0]
+        return result.inserted_primary_key[0], paciente_id
 
-def consultar_historico(usuario, fecha_inicio, fecha_fin) -> list:
-    stmt = (
-        select(
-            resultados.c.id,
-            resultados.c.usuario,
-            resultados.c.doctor_id,
-            resultados.c.fecha_prueba,
-            resultados.c.puntaje,
-            resultados.c.nivel,
-            resultados.c.descripcion,
-        )
-        .where(
-            resultados.c.usuario == usuario,
-            resultados.c.fecha_prueba.between(fecha_inicio, fecha_fin),
-        )
-        .order_by(resultados.c.fecha_prueba)
-    )
+def consultar_historico(uid, fecha_inicio, fecha_fin):
+    """Mapea uid -> id interno y devuelve (paciente, lista de resultados).
+    Si el uid no está registrado devuelve (None, [])."""
     with engine.connect() as con:
+        paciente = buscar_paciente(con, uid)
+        if paciente is None:
+            return None, []
+        stmt = (
+            select(
+                resultados.c.id,
+                resultados.c.doctor_id,
+                resultados.c.fecha_prueba,
+                resultados.c.puntaje,
+                resultados.c.nivel,
+                resultados.c.descripcion,
+            )
+            .where(
+                resultados.c.paciente_id == paciente["id"],
+                resultados.c.fecha_prueba.between(fecha_inicio, fecha_fin),
+            )
+            .order_by(resultados.c.fecha_prueba)
+        )
         filas = con.execute(stmt).mappings().all()
-        return [dict(f) for f in filas]
+        return paciente, [dict(f) for f in filas]
 
 # ── Publish/Subscribe: anunciar eventos de negocio ────────────────────────────
-def publicar_evento(ch, id_test, usuario, puntaje, nivel, fecha_prueba):
+def publicar_evento(ch, id_test, uid, puntaje, nivel, fecha_prueba):
     """Publica en el exchange topic de eventos. Cualquier servicio suscrito
     a EXCHANGE_EVENTOS con la routing key 'gds15.*' o 'gds15.resultado.*'
     se entera de esto sin que el servicio GDS-15 sepa quién es."""
@@ -163,7 +224,7 @@ def publicar_evento(ch, id_test, usuario, puntaje, nivel, fecha_prueba):
         "evento":       "resultado_guardado",
         "test":         "gds15",
         "id_test":      id_test,
-        "usuario":      usuario,
+        "uid":          uid,
         "puntaje":      puntaje,
         "nivel":        nivel,
         "fecha_prueba": fecha_prueba,
@@ -186,19 +247,23 @@ def on_mensaje(ch, method, props, body):
             puntaje = calcular_puntaje(bits)
             nivel, desc = interpretar(puntaje)
 
-            id_test = guardar(
-                msg["usuario"], msg.get("doctor_id"), msg["fecha_prueba"],
+            uid    = str(msg["uid"]).strip()
+            nombre = str(msg["nombre"]).strip()
+            id_test, paciente_id = guardar(
+                uid, nombre, msg.get("doctor_id"), msg["fecha_prueba"],
                 bits, puntaje, nivel, desc
             )
 
             # Publish/Subscribe: avisar al resto del sistema que hay un
             # resultado nuevo (independiente de la respuesta RPC de abajo).
-            publicar_evento(ch, id_test, msg["usuario"], puntaje, nivel, msg["fecha_prueba"])
+            publicar_evento(ch, id_test, uid, puntaje, nivel, msg["fecha_prueba"])
 
             respuesta = {
                 "status":         "ok",
                 "id_test":        id_test,
-                "usuario":        msg["usuario"],
+                "uid":            uid,
+                "paciente_id":    paciente_id,
+                "nombre":         nombre,
                 "fecha_prueba":   msg["fecha_prueba"],
                 "puntaje":        puntaje,
                 "maximo":         15,
@@ -208,13 +273,14 @@ def on_mensaje(ch, method, props, body):
             }
 
         elif tipo == "consultar_historico":
-            historico = consultar_historico(
-                msg["usuario"],
+            paciente, historico = consultar_historico(
+                str(msg["uid"]).strip(),
                 msg.get("fecha_inicio", "2000-01-01"),
                 msg.get("fecha_fin",    "2999-12-31"),
             )
             respuesta = {
                 "status":         "ok",
+                "paciente":       paciente,
                 "resultados":     historico,
                 "correlation_id": props.correlation_id,
             }
@@ -244,7 +310,7 @@ def main():
     try:
         init_db()
     except Exception as e:
-        print(f"[!] No se pudo conectar/crear la tabla en MySQL: {e}")
+        print(f"[!] No se pudo conectar/crear las tablas en MySQL: {e}")
         print(f"    Revisa DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_NAME y que la base '{DB_NAME}' exista.")
         return
 

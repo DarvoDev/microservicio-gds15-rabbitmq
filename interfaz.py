@@ -107,8 +107,11 @@ def modo_test():
     print("  Responda según como se ha sentido la ÚLTIMA SEMANA")
     print("=" * 62 + "\n")
 
-    usuario   = input("  Usuario   : ").strip()
-    doctor_id = input("  Doctor ID : ").strip()
+    # El paciente se identifica por el UID de su expediente (no por nombre:
+    # puede haber homónimos). El nombre solo alimenta la tabla local.
+    uid       = input("  UID expediente : ").strip()
+    nombre    = input("  Nombre         : ").strip()
+    doctor_id = input("  Doctor ID      : ").strip()
     print()
 
     respuestas = recopilar_respuestas()
@@ -116,7 +119,8 @@ def modo_test():
 
     resultado = enviar_y_esperar({
         "tipo":            "aplicar_test",
-        "usuario":         usuario,
+        "uid":             uid,
+        "nombre":          nombre,
         "doctor_id":       doctor_id,
         "fecha_prueba":    datetime.now().isoformat(timespec="seconds"),
         "respuestas_bits": bits,
@@ -125,24 +129,32 @@ def modo_test():
     mostrar_resultado(respuestas, bits, resultado)
 
 def modo_historico():
-    usuario = input("  Usuario: ").strip()
+    uid = input("  UID expediente: ").strip()
 
     # Pide todos los registros sin filtro de fecha
     resultado = enviar_y_esperar({
         "tipo":         "consultar_historico",
-        "usuario":      usuario,
+        "uid":          uid,
         "fecha_inicio": "2000-01-01",
         "fecha_fin":    "2999-12-31",
     })
 
+    if resultado.get("status") == "error":
+        print(f"\n  [!] Error del servicio: {resultado.get('error')}\n")
+        return
+
+    paciente  = resultado.get("paciente")
     registros = resultado.get("resultados", [])
 
+    if not paciente:
+        print(f"\n  No hay paciente registrado con UID '{uid}'.\n")
+        return
     if not registros:
-        print(f"\n  Sin registros para '{usuario}'.\n")
+        print(f"\n  Sin registros para {paciente['nombre']} (UID {uid}).\n")
         return
 
     # Muestra la lista
-    print(f"\n  Resultados de '{usuario}':\n")
+    print(f"\n  Resultados de {paciente['nombre']} (UID {uid}):\n")
     print("  {:>4}  {:^20}  {:>7}  {}".format("ID", "Fecha", "Puntaje", "Nivel"))
     print("  " + "-" * 60)
     for r in registros:
@@ -168,7 +180,8 @@ def modo_historico():
     print("\n" + "=" * 62)
     print("  DETALLE  GDS-15")
     print("=" * 62)
-    print(f"  Usuario     : {seleccionado['usuario']}")
+    print(f"  Paciente    : {paciente['nombre']}")
+    print(f"  UID         : {paciente['uid']}")
     print(f"  Doctor      : {seleccionado.get('doctor_id', '-')}")
     print(f"  Fecha       : {seleccionado['fecha_prueba']}")
     print(f"  Puntaje     : {seleccionado['puntaje']} / 15")
@@ -186,6 +199,7 @@ def mostrar_resultado(respuestas, bits, resultado):
     print("  RESULTADO  GDS-15")
     print("=" * 62)
     print(f"\n  ID Test     : {resultado.get('id_test', '-')}")
+    print(f"  Paciente    : {resultado.get('nombre', '-')} (UID {resultado.get('uid', '-')})")
     print(f"  Puntaje     : {puntaje} / 15")
     print(f"  Nivel       : {resultado['nivel']}")
     print(f"  Descripción : {resultado['descripcion']}")

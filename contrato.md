@@ -15,7 +15,7 @@ interfaz.py ──publish──▶ [ EXCHANGE_SOLICITUD (direct) ] ──routing
 ```
 
 - **`intermediario.py`**: declara toda la topología (exchanges, cola, binding). Se ejecuta **una sola vez**, antes que los demás.
-- **`service.py`**: consume `gds15.solicitud`, aplica lógica de negocio, persiste en SQLite y responde por RPC. También publica eventos de negocio en `EXCHANGE_EVENTOS`.
+- **`service.py`**: consume `gds15.solicitud`, aplica lógica de negocio, persiste en MySQL y responde por RPC. También publica eventos de negocio en `EXCHANGE_EVENTOS`.
 - **`interfaz.py`**: recopila respuestas del usuario, publica la solicitud al exchange y espera la respuesta RPC en una cola exclusiva propia.
 
 **Orden de ejecución obligatorio:**
@@ -65,6 +65,17 @@ python3 interfaz.py        # 3. cada vez que un usuario lo use
 
 ## 3. Contrato de ENTRADA (interfaz → service, vía RPC)
 
+### Identificación del paciente
+
+El paciente **no se identifica por nombre** (puede haber homónimos). Se manejan dos identificadores:
+
+| Identificador | Dónde vive | Uso |
+|---|---|---|
+| `uid` | Expediente en la aplicación general del hospital | Es lo que viaja en los mensajes. Único por paciente. |
+| `paciente_id` | Tabla local `pacientes` de este servicio (PK interna) | Los resultados se guardan contra este id. El servicio mapea `uid → paciente_id` al recibir cada mensaje. |
+
+El `nombre` se envía en `aplicar_test` solo para mantener la tabla local de pacientes; si cambia en el expediente se actualiza. Nunca se usa para buscar.
+
 Es el mismo sobre en ambos casos (`aplicar_test` y `consultar_historico`); cambia qué campos son obligatorios.
 
 ### Campos comunes del sobre RPC
@@ -78,12 +89,13 @@ Es el mismo sobre en ambos casos (`aplicar_test` y `consultar_historico`); cambi
 ### 3.1 `tipo = "aplicar_test"`
 
 Campos obligatorios validados por `service.py` → `CAMPOS_OBLIGATORIOS["aplicar_test"]`:
-`usuario`, `doctor_id`, `fecha_prueba`, `respuestas_bits`
+`uid`, `nombre`, `doctor_id`, `fecha_prueba`, `respuestas_bits` (strings vacíos cuentan como faltantes)
 
 ```json
 {
   "tipo": "aplicar_test",
-  "usuario": "string",
+  "uid": "EXP-000123",
+  "nombre": "Juan Pérez López",
   "doctor_id": "string",
   "fecha_prueba": "2026-08-16T10:30:00",
   "respuestas_bits": 22014,
@@ -95,7 +107,8 @@ Campos obligatorios validados por `service.py` → `CAMPOS_OBLIGATORIOS["aplicar
 
 | Campo | Tipo | Descripción |
 |---|---|---|
-| `usuario` | `string` | Identificador del paciente (equivalente a `idPaciente` en el resto del proyecto) |
+| `uid` | `string` (máx. 64) | UID del expediente del paciente en la aplicación general. Si no existe en la tabla local, se da de alta. |
+| `nombre` | `string` (máx. 150) | Nombre del paciente. Se guarda/actualiza en la tabla local `pacientes`. |
 | `doctor_id` | `string` | Identificador del geriatra que aplica el test (equivalente a `idGeriatra`) |
 | `fecha_prueba` | `string` (ISO 8601) | Fecha en que se aplicó el test |
 | `respuestas_bits` | `int` | Las 15 respuestas del GDS-15 codificadas en bits (bit `i` = 1 si la respuesta a la pregunta `i+1` fue "SI") |
@@ -103,12 +116,12 @@ Campos obligatorios validados por `service.py` → `CAMPOS_OBLIGATORIOS["aplicar
 
 ### 3.2 `tipo = "consultar_historico"`
 
-Campo obligatorio: `usuario`
+Campo obligatorio: `uid`
 
 ```json
 {
   "tipo": "consultar_historico",
-  "usuario": "string",
+  "uid": "EXP-000123",
   "fecha_inicio": "2000-01-01",
   "fecha_fin": "2999-12-31",
   "correlation_id": "9b2d4a11-...",
@@ -118,7 +131,7 @@ Campo obligatorio: `usuario`
 
 | Campo | Tipo | Descripción |
 |---|---|---|
-| `usuario` | `string` | Paciente del cual se quiere el histórico |
+| `uid` | `string` | UID del expediente del paciente del cual se quiere el histórico. El servicio lo mapea a su `paciente_id` interno. |
 | `fecha_inicio` | `string` | Filtro opcional, default `"2000-01-01"` si se omite |
 | `fecha_fin` | `string` | Filtro opcional, default `"2999-12-31"` si se omite |
 
@@ -132,7 +145,9 @@ Campo obligatorio: `usuario`
 {
   "status": "ok",
   "id_test": 17,
-  "usuario": "string",
+  "uid": "EXP-000123",
+  "paciente_id": 5,
+  "nombre": "Juan Pérez López",
   "fecha_prueba": "2026-08-16T10:30:00",
   "puntaje": 4,
   "maximo": 15,
@@ -145,8 +160,10 @@ Campo obligatorio: `usuario`
 | Campo | Tipo | Descripción |
 |---|---|---|
 | `status` | `string` | `"ok"` o `"error"` |
-| `id_test` | `int` | ID autogenerado del registro guardado en SQLite (`lastrowid`) |
-| `usuario` | `string` | Eco del paciente evaluado |
+| `id_test` | `int` | ID autogenerado del registro guardado en MySQL |
+| `uid` | `string` | Eco del UID del expediente |
+| `paciente_id` | `int` | ID interno del paciente en este servicio |
+| `nombre` | `string` | Eco del nombre del paciente |
 | `fecha_prueba` | `string` | Eco de la fecha recibida |
 | `puntaje` | `int` | Puntaje calculado, 0–15 |
 | `maximo` | `int` | Constante, `15` |
@@ -163,10 +180,14 @@ Campo obligatorio: `usuario`
 ```json
 {
   "status": "ok",
+  "paciente": {
+    "id": 5,
+    "uid": "EXP-000123",
+    "nombre": "Juan Pérez López"
+  },
   "resultados": [
     {
       "id": 12,
-      "usuario": "string",
       "doctor_id": "string",
       "fecha_prueba": "2026-07-01T09:00:00",
       "puntaje": 6,
@@ -178,7 +199,8 @@ Campo obligatorio: `usuario`
 }
 ```
 
-`resultados` es una lista (puede venir vacía) de objetos con las columnas: `id`, `usuario`, `doctor_id`, `fecha_prueba`, `puntaje`, `nivel`, `descripcion`.
+- `paciente`: datos de la tabla local (`id` interno, `uid`, `nombre`). Es `null` si el `uid` nunca ha sido registrado (en ese caso `resultados` viene vacío).
+- `resultados`: lista (puede venir vacía) de objetos con las columnas: `id`, `doctor_id`, `fecha_prueba`, `puntaje`, `nivel`, `descripcion`.
 
 ### 4.3 Respuesta de error
 
@@ -206,7 +228,7 @@ Se devuelve cuando falta un campo obligatorio, `tipo` es desconocido, o cualquie
   "evento": "resultado_guardado",
   "test": "gds15",
   "id_test": 17,
-  "usuario": "string",
+  "uid": "EXP-000123",
   "puntaje": 4,
   "nivel": "Normal",
   "fecha_prueba": "2026-08-16T10:30:00",
@@ -218,12 +240,26 @@ Se devuelve cuando falta un campo obligatorio, `tipo` es desconocido, o cualquie
 
 ## 6. Persistencia (MySQL)
 
-Tabla `resultados`, creada por `init_db()` en `service.py` vía SQLAlchemy (`metadata.create_all`). La **base de datos** (schema) debe existir de antemano; SQLAlchemy solo crea la tabla dentro de ella.
+Tablas `pacientes` y `resultados`, creadas por `init_db()` en `service.py` vía SQLAlchemy (`metadata.create_all`). La **base de datos** (schema) debe existir de antemano; SQLAlchemy solo crea las tablas dentro de ella.
+
+### Tabla `pacientes`
 
 | Columna | Tipo | Nulo | Descripción |
 |---|---|---|---|
-| `id` | `INTEGER PK AUTO_INCREMENT` | No | ID interno |
-| `usuario` | `VARCHAR(100)` | No | Paciente |
+| `id` | `INTEGER PK AUTO_INCREMENT` | No | ID interno del paciente en este servicio |
+| `uid` | `VARCHAR(64) UNIQUE` | No | UID del expediente en la aplicación general |
+| `nombre` | `VARCHAR(150)` | No | Nombre del paciente (referencia, se actualiza si cambia) |
+| `fecha_registro` | `VARCHAR(40)` | No | Timestamp UTC del alta |
+| `fecha_actualizacion` | `VARCHAR(40)` | No | Timestamp UTC de la última vez que se recibió el paciente |
+
+El alta/actualización se hace con `INSERT ... ON DUPLICATE KEY UPDATE` sobre `uid`, así que es atómica y nunca duplica un `uid`.
+
+### Tabla `resultados`
+
+| Columna | Tipo | Nulo | Descripción |
+|---|---|---|---|
+| `id` | `INTEGER PK AUTO_INCREMENT` | No | ID interno del test |
+| `paciente_id` | `INTEGER FK → pacientes.id` | No | Paciente (id interno) |
 | `doctor_id` | `VARCHAR(100)` | Sí | Geriatra |
 | `fecha_prueba` | `VARCHAR(40)` | No | Fecha clínica de aplicación |
 | `respuestas_bits` | `INTEGER` | No | Respuestas codificadas |
@@ -232,7 +268,15 @@ Tabla `resultados`, creada por `init_db()` en `service.py` vía SQLAlchemy (`met
 | `descripcion` | `TEXT` | No | Descripción del nivel |
 | `fecha_registro` | `VARCHAR(40)` | No | Timestamp UTC de inserción en el sistema |
 
-> El contrato JSON de entrada/salida (secciones 3 y 4) **no cambió** al migrar de SQLite a MySQL — solo cambió cómo se persiste internamente en `service.py`.
+### Migración desde el esquema anterior (por nombre)
+
+Versiones previas guardaban el nombre en `resultados.usuario`. `create_all` no altera tablas existentes, así que si `service.py` detecta la tabla vieja (sin `paciente_id`) se niega a arrancar. Antes de arrancar, renombra (o elimina) la tabla vieja:
+
+```sql
+RENAME TABLE resultados TO resultados_legacy;
+```
+
+Los registros viejos no tienen `uid`, por lo que no se migran automáticamente.
 
 ---
 

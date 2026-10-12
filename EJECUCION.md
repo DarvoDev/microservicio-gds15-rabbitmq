@@ -89,7 +89,7 @@ python .\interfaz.py
 ```
 
 - `[1] Aplicar test` → responder las 15 preguntas; devuelve puntaje e interpretación.
-- `[2] Consultar histórico` → usar el mismo nombre de paciente; debe aparecer el registro recién creado.
+- `[2] Consultar histórico` → usar el mismo UID de expediente; debe aparecer el registro recién creado.
 
 ---
 
@@ -142,10 +142,10 @@ Abrir <http://localhost:8081>:
 ### Opción C — consola
 
 ```powershell
-docker exec -it mysql-gds15 mysql -uroot -pchangeme -e "SELECT * FROM gds15.resultados;"
+docker exec -it mysql-gds15 mysql -uroot -pchangeme -e "SELECT * FROM gds15.pacientes; SELECT * FROM gds15.resultados;"
 ```
 
-> La tabla `resultados` se crea al arrancar `service.py` por primera vez; las filas aparecen al aplicar tests.
+> Las tablas `pacientes` y `resultados` se crean al arrancar `service.py` por primera vez; las filas aparecen al aplicar tests.
 
 ---
 
