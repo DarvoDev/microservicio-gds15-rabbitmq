@@ -88,8 +88,9 @@ venv\Scripts\activate
 python .\interfaz.py
 ```
 
-- `[1] Aplicar test` → capturar UID del expediente, nombre del paciente y Doctor ID, y responder las 15 preguntas; devuelve puntaje e interpretación. Si el UID es nuevo, el paciente se da de alta solo.
+- `[1] Aplicar test` → capturar UID del expediente, nombre del paciente y Doctor ID, y responder las 15 preguntas; devuelve puntaje e interpretación. Si el UID es nuevo, el paciente se da de alta solo. Si se deja vacío, se genera uno de prueba (`TMP-XXXXXXXX`) y se muestra en pantalla.
 - `[2] Consultar histórico` → usar el mismo UID de expediente; debe aparecer el registro recién creado.
+- `[3] Listar pacientes` → muestra UID, nombre y número de tests de cada paciente registrado.
 
 ---
 
@@ -228,6 +229,10 @@ El entorno virtual no está activo en esa terminal (el prompt debe empezar con `
 ### `python` no se reconoce
 
 Usar `py` en su lugar (`py .\service.py`).
+
+### `UID no válido` / `uid inválido '...': debe cumplir el formato ...`
+
+El uid tiene espacios en medio, puntos, acentos u otros caracteres no permitidos, o no cumple el `UID_PATRON` configurado. Por defecto solo se aceptan letras, dígitos, `-` y `_` (hasta 64). Ver [`FORMATO_UID.md`](./FORMATO_UID.md). Si cambiaste `UID_PATRON`, debe tener el mismo valor en la terminal del servicio y en la de la interfaz.
 
 ### `interfaz.py` se queda esperando respuesta
 

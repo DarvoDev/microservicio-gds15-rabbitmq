@@ -10,9 +10,10 @@
 #   EXCHANGE_SOLICITUD  default: geriatricos.solicitudes   (creado por intermediario.py)
 #   ROUTING_KEY_GDS15   default: gds15
 #   COLA_RESPUESTAS     default: gds15.resultados.<hostname>
+#   UID_PATRON          default: ^[A-Z0-9_-]{1,64}$   (debe ser el mismo que en service.py)
 
 from socket import gethostname
-import os, json, uuid, pika
+import os, re, json, uuid, pika
 from datetime import datetime
 
 RABBIT_HOST        = os.getenv("RABBIT_HOST",        "localhost")
@@ -22,6 +23,10 @@ EXCHANGE_SOLICITUD  = os.getenv("EXCHANGE_SOLICITUD",  "geriatricos.solicitudes"
 ROUTING_KEY_GDS15   = os.getenv("ROUTING_KEY_GDS15",   "gds15")
 
 COLA_RESPUESTAS     = os.getenv("COLA_RESPUESTAS", f"gds15.resultados.{gethostname()}")
+
+# Pre-validación del uid para avisar al momento; la validación que manda es la
+# de service.py (otros clientes pueden enviar mensajes sin pasar por aquí).
+UID_PATRON          = re.compile(os.getenv("UID_PATRON", r"^[A-Z0-9_-]{1,64}$"))
 
 PREGUNTAS = (
     ("¿En general, está satisfecho(a) con su vida?",                              "NO"),
@@ -50,6 +55,20 @@ def leer_respuesta(numero, texto):
         if entrada in validas_si: return "SI"
         if entrada in validas_no: return "NO"
         print("         Respuesta no válida. Ingrese SI o NO.\n")
+
+def leer_uid(etiqueta, generar_si_vacio=False):
+    """Pide el uid hasta que cumpla UID_PATRON (normalizado a mayúsculas).
+    Con generar_si_vacio, una entrada vacía genera un uid de prueba TMP-XXXXXXXX."""
+    while True:
+        uid = input(etiqueta).strip().upper()
+        if not uid and generar_si_vacio:
+            # Solo para pruebas: en producción el uid lo manda la aplicación general.
+            uid = f"TMP-{uuid.uuid4().hex[:8].upper()}"
+            print(f"  UID generado   : {uid}  (anótelo para consultar el histórico)")
+            return uid
+        if len(uid) <= 64 and UID_PATRON.fullmatch(uid):
+            return uid
+        print(f"  UID no válido. Formato esperado: {UID_PATRON.pattern}\n")
 
 def recopilar_respuestas():
     return [leer_respuesta(i + 1, PREGUNTAS[i][0]) for i in range(len(PREGUNTAS))]
@@ -109,7 +128,7 @@ def modo_test():
 
     # El paciente se identifica por el UID de su expediente (no por nombre:
     # puede haber homónimos). El nombre solo alimenta la tabla local.
-    uid       = input("  UID expediente : ").strip()
+    uid       = leer_uid("  UID expediente (vacío = generar uno de prueba): ", generar_si_vacio=True)
     nombre    = input("  Nombre         : ").strip()
     doctor_id = input("  Doctor ID      : ").strip()
     print()
@@ -129,7 +148,7 @@ def modo_test():
     mostrar_resultado(respuestas, bits, resultado)
 
 def modo_historico():
-    uid = input("  UID expediente: ").strip()
+    uid = leer_uid("  UID expediente: ")
 
     # Pide todos los registros sin filtro de fecha
     resultado = enviar_y_esperar({
@@ -188,6 +207,26 @@ def modo_historico():
     print(f"  Nivel       : {seleccionado['nivel']}")
     print(f"  Descripción : {seleccionado['descripcion']}\n")
 
+def modo_pacientes():
+    resultado = enviar_y_esperar({"tipo": "listar_pacientes"})
+
+    if resultado.get("status") == "error":
+        print(f"\n  [!] Error del servicio: {resultado.get('error')}\n")
+        return
+
+    lista = resultado.get("pacientes", [])
+    if not lista:
+        print("\n  No hay pacientes registrados.\n")
+        return
+
+    # Se muestra el UID (no el id interno): es el que se usa para consultar el histórico
+    print(f"\n  Pacientes registrados ({len(lista)}):\n")
+    print("  {:<20}  {:<30}  {:>5}".format("UID", "Nombre", "Tests"))
+    print("  " + "-" * 59)
+    for p in lista:
+        print("  {:<20}  {:<30}  {:>5}".format(p["uid"], p["nombre"], p["total_tests"]))
+    print()
+
 # ── Presentación de resultados ────────────────────────────────────────────────
 def mostrar_resultado(respuestas, bits, resultado):
     if resultado.get("status") == "error":
@@ -223,11 +262,14 @@ def main():
         RABBIT_HOST, EXCHANGE_SOLICITUD, ROUTING_KEY_GDS15))
     print("  [1] Aplicar test")
     print("  [2] Consultar histórico")
+    print("  [3] Listar pacientes")
     opcion = input("\n  Opción: ").strip()
     if opcion == "1":
         modo_test()
     elif opcion == "2":
         modo_historico()
+    elif opcion == "3":
+        modo_pacientes()
     else:
         print("  Opción no válida.")
 

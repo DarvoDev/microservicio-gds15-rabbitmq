@@ -50,6 +50,7 @@ python3 interfaz.py        # 3. cada vez que un usuario lo use
 | `DB_PASSWORD` | `""` | Contraseña del usuario de MySQL |
 | `DB_NAME` | `gds15` | Nombre de la base de datos (debe existir de antemano) |
 | `DB_URL` | *(vacío)* | Si se define, sobreescribe las 5 variables anteriores. Formato: `mysql+pymysql://usuario:clave@host:puerto/nombre_bd?charset=utf8mb4` |
+| `UID_PATRON` | `^[A-Z0-9_-]{1,64}$` | Formato que debe cumplir el `uid` (ver [`FORMATO_UID.md`](./FORMATO_UID.md)) |
 
 ### `interfaz.py`
 | Variable | Default | Descripción |
@@ -58,6 +59,7 @@ python3 interfaz.py        # 3. cada vez que un usuario lo use
 | `EXCHANGE_SOLICITUD` | `geriatricos.solicitudes` | Debe coincidir con lo declarado por `intermediario.py` |
 | `ROUTING_KEY_GDS15` | `gds15` | Debe coincidir con lo declarado por `intermediario.py` |
 | `COLA_RESPUESTAS` | `gds15.resultados.<hostname>` | Cola exclusiva propia de cada instancia de interfaz |
+| `UID_PATRON` | `^[A-Z0-9_-]{1,64}$` | Pre-validación del `uid` al capturarlo; debe ser igual al de `service.py` |
 
 > **Nota:** `EXCHANGE_SOLICITUD` y `ROUTING_KEY_GDS15` deben ser **idénticas** en `intermediario.py` y en `interfaz.py`, o el mensaje nunca llegará a la cola de `service.py`.
 
@@ -78,13 +80,15 @@ El `nombre` se envía en `aplicar_test` solo para mantener la tabla local de pac
 
 Los clientes siempre envían el `uid`, nunca el `paciente_id`: este último es interno del servicio y solo se devuelve como referencia. Ejemplo: el expediente `EXP-000123` puede corresponder al `paciente_id` `5`; quien consulte el histórico lo hace con `EXP-000123`. La explicación completa está en el [README](./README.md#identificación-del-paciente-uid-e-id).
 
-Es el mismo sobre en ambos casos (`aplicar_test` y `consultar_historico`); cambia qué campos son obligatorios.
+Antes de usarlo, el servicio **normaliza** el `uid` (quita espacios a los lados y lo pasa a mayúsculas) y lo **valida** contra `UID_PATRON` (por defecto `^[A-Z0-9_-]{1,64}$`). Si no cumple, responde con error y no guarda nada. Los ecos de `uid` en las respuestas y eventos van ya normalizados. Detalle y ejemplos en [`FORMATO_UID.md`](./FORMATO_UID.md).
+
+Es el mismo sobre en todos los casos (`aplicar_test`, `consultar_historico` y `listar_pacientes`); cambia qué campos son obligatorios.
 
 ### Campos comunes del sobre RPC
 
 | Campo | Tipo | Obligatorio | Descripción |
 |---|---|---|---|
-| `tipo` | `string` | Sí | `"aplicar_test"` o `"consultar_historico"` |
+| `tipo` | `string` | Sí | `"aplicar_test"`, `"consultar_historico"` o `"listar_pacientes"` |
 | `correlation_id` | `string` (UUID) | Sí, lo agrega `interfaz.py` automáticamente | Identifica la solicitud para casar la respuesta RPC |
 | `reply_to` | `string` | Sí, lo agrega `interfaz.py` automáticamente | Cola exclusiva donde `service.py` debe publicar la respuesta |
 
@@ -109,7 +113,7 @@ Campos obligatorios validados por `service.py` → `CAMPOS_OBLIGATORIOS["aplicar
 
 | Campo | Tipo | Descripción |
 |---|---|---|
-| `uid` | `string` (máx. 64) | UID del expediente del paciente en la aplicación general. Si no existe en la tabla local, se da de alta. |
+| `uid` | `string` (máx. 64) | UID del expediente del paciente en la aplicación general. Se normaliza y valida (ver arriba). Si no existe en la tabla local, se da de alta. |
 | `nombre` | `string` (máx. 150) | Nombre del paciente. Se guarda/actualiza en la tabla local `pacientes`. |
 | `doctor_id` | `string` | Identificador del geriatra que aplica el test (equivalente a `idGeriatra`) |
 | `fecha_prueba` | `string` (ISO 8601) | Fecha en que se aplicó el test |
@@ -133,9 +137,21 @@ Campo obligatorio: `uid`
 
 | Campo | Tipo | Descripción |
 |---|---|---|
-| `uid` | `string` | UID del expediente del paciente del cual se quiere el histórico. El servicio lo mapea a su `paciente_id` interno. |
+| `uid` | `string` | UID del expediente del paciente del cual se quiere el histórico. Se normaliza y valida igual que en `aplicar_test`; el servicio lo mapea a su `paciente_id` interno. |
 | `fecha_inicio` | `string` | Filtro opcional, default `"2000-01-01"` si se omite |
 | `fecha_fin` | `string` | Filtro opcional, default `"2999-12-31"` si se omite |
+
+### 3.3 `tipo = "listar_pacientes"`
+
+Sin campos obligatorios aparte del sobre.
+
+```json
+{
+  "tipo": "listar_pacientes",
+  "correlation_id": "5c7e0f42-...",
+  "reply_to": "gds15.resultados.equipo-pc01"
+}
+```
 
 ---
 
@@ -204,9 +220,25 @@ Campo obligatorio: `uid`
 - `paciente`: datos de la tabla local (`id` interno, `uid`, `nombre`). Es `null` si el `uid` nunca ha sido registrado (en ese caso `resultados` viene vacío).
 - `resultados`: lista (puede venir vacía) de objetos con las columnas: `id`, `doctor_id`, `fecha_prueba`, `puntaje`, `nivel`, `descripcion`.
 
-### 4.3 Respuesta de error
+### 4.3 Respuesta a `listar_pacientes`
 
-Se devuelve cuando falta un campo obligatorio, `tipo` es desconocido, o cualquier excepción no controlada:
+```json
+{
+  "status": "ok",
+  "pacientes": [
+    { "uid": "EXP-000123", "nombre": "Juan Pérez López", "total_tests": 3 },
+    { "uid": "TMP-9243B31D", "nombre": "Ana", "total_tests": 1 }
+  ],
+  "correlation_id": "5c7e0f42-..."
+}
+```
+
+- `pacientes`: lista (puede venir vacía) de todos los pacientes registrados, ordenada por `nombre`. Cada uno trae su `uid`, `nombre` y `total_tests` (cuántos resultados tiene guardados; puede ser `0`).
+- No incluye el `paciente_id` interno: el `uid` es el que se usa para consultar el histórico.
+
+### 4.4 Respuesta de error
+
+Se devuelve cuando falta un campo obligatorio, el `uid` no cumple el formato, `tipo` es desconocido, o cualquier excepción no controlada:
 
 ```json
 {

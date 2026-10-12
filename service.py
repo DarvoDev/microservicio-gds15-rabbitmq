@@ -26,13 +26,14 @@
 #   DB_NAME            default: gds15
 #   DB_URL             opcional: si se define, sobreescribe DB_HOST/PORT/USER/PASSWORD/NAME
 #                      (ej: mysql+pymysql://usuario:clave@host:3306/gds15?charset=utf8mb4)
+#   UID_PATRON         default: ^[A-Z0-9_-]{1,64}$   (regex que debe cumplir el uid, ver FORMATO_UID.md)
 
-import os, json
+import os, re, json
 from datetime import datetime, timezone
 import pika
 from sqlalchemy import (
     create_engine, MetaData, Table, Column, ForeignKey,
-    Integer, String, Text, select, insert, inspect
+    Integer, String, Text, select, insert, inspect, func
 )
 from sqlalchemy.dialects.mysql import insert as mysql_insert
 
@@ -46,6 +47,12 @@ COLA_SOLICITUD      = os.getenv("COLA_SOLICITUD",      "gds15.solicitud")
 # suscribirse sin que este servicio sepa que existe. Lo declara intermediario.py.
 EXCHANGE_EVENTOS    = os.getenv("EXCHANGE_EVENTOS",    "geriatricos.eventos")
 EVENTO_GUARDADO_RK  = "gds15.resultado.guardado"
+
+# Formato del uid del expediente. Se valida DESPUÉS de normalizar (sin espacios
+# a los lados y en mayúsculas). Cuando se conozca el formato real de la
+# aplicación general del hospital, basta con definir UID_PATRON.
+UID_PATRON  = re.compile(os.getenv("UID_PATRON", r"^[A-Z0-9_-]{1,64}$"))
+UID_MAX_LEN = 64   # tamaño de pacientes.uid en MySQL
 
 # ── Conexión a MySQL ──────────────────────────────────────────────────────────
 DB_HOST     = os.getenv("DB_HOST",     "localhost")
@@ -93,7 +100,7 @@ resultados = Table(
 
 # ── Esquema del mensaje de entrada (documentado) ──────────────────────────────
 # {
-#   "tipo":            "aplicar_test" | "consultar_historico",
+#   "tipo":            "aplicar_test" | "consultar_historico" | "listar_pacientes",
 #   "uid":             str   -> uid del expediente del paciente (aplicación general)
 #   "nombre":          str   -> nombre del paciente (solo aplicar_test)
 #   "doctor_id":       str   -> identificador del geriatra  (idGeriatra)
@@ -108,6 +115,7 @@ resultados = Table(
 CAMPOS_OBLIGATORIOS = {
     "aplicar_test":        ("uid", "nombre", "doctor_id", "fecha_prueba", "respuestas_bits"),
     "consultar_historico": ("uid",),
+    "listar_pacientes":    (),
 }
 
 def validar_mensaje(msg: dict):
@@ -117,6 +125,17 @@ def validar_mensaje(msg: dict):
     if faltantes:
         raise ValueError(f"Campos obligatorios faltantes para '{tipo}': {faltantes}")
     return tipo
+
+def normalizar_uid(valor) -> str:
+    """Quita espacios a los lados, pasa a mayúsculas y valida contra UID_PATRON.
+    La columna pacientes.uid no distingue mayúsculas, así que normalizar evita
+    que 'exp-1' y 'EXP-1' se vean distintos aunque sean el mismo paciente."""
+    uid = str(valor).strip().upper()
+    if len(uid) > UID_MAX_LEN:
+        raise ValueError(f"uid inválido '{uid}': máximo {UID_MAX_LEN} caracteres")
+    if not UID_PATRON.fullmatch(uid):
+        raise ValueError(f"uid inválido '{uid}': debe cumplir el formato {UID_PATRON.pattern}")
+    return uid
 
 # ── Lógica de negocio (sin cambios respecto a tu original) ───────────────────
 RESPUESTAS_PUNTUADAS = 0b110_1011_1010_1110
@@ -215,6 +234,22 @@ def consultar_historico(uid, fecha_inicio, fecha_fin):
         filas = con.execute(stmt).mappings().all()
         return paciente, [dict(f) for f in filas]
 
+def listar_pacientes():
+    """Devuelve [{uid, nombre, total_tests}] de todos los pacientes, por nombre.
+    No expone el id interno: los clientes siempre trabajan con el uid."""
+    stmt = (
+        select(
+            pacientes.c.uid,
+            pacientes.c.nombre,
+            func.count(resultados.c.id).label("total_tests"),
+        )
+        .select_from(pacientes.outerjoin(resultados, resultados.c.paciente_id == pacientes.c.id))
+        .group_by(pacientes.c.id, pacientes.c.uid, pacientes.c.nombre)
+        .order_by(pacientes.c.nombre, pacientes.c.uid)
+    )
+    with engine.connect() as con:
+        return [dict(f) for f in con.execute(stmt).mappings().all()]
+
 # ── Publish/Subscribe: anunciar eventos de negocio ────────────────────────────
 def publicar_evento(ch, id_test, uid, puntaje, nivel, fecha_prueba):
     """Publica en el exchange topic de eventos. Cualquier servicio suscrito
@@ -247,7 +282,7 @@ def on_mensaje(ch, method, props, body):
             puntaje = calcular_puntaje(bits)
             nivel, desc = interpretar(puntaje)
 
-            uid    = str(msg["uid"]).strip()
+            uid    = normalizar_uid(msg["uid"])
             nombre = str(msg["nombre"]).strip()
             id_test, paciente_id = guardar(
                 uid, nombre, msg.get("doctor_id"), msg["fecha_prueba"],
@@ -274,7 +309,7 @@ def on_mensaje(ch, method, props, body):
 
         elif tipo == "consultar_historico":
             paciente, historico = consultar_historico(
-                str(msg["uid"]).strip(),
+                normalizar_uid(msg["uid"]),
                 msg.get("fecha_inicio", "2000-01-01"),
                 msg.get("fecha_fin",    "2999-12-31"),
             )
@@ -282,6 +317,13 @@ def on_mensaje(ch, method, props, body):
                 "status":         "ok",
                 "paciente":       paciente,
                 "resultados":     historico,
+                "correlation_id": props.correlation_id,
+            }
+
+        elif tipo == "listar_pacientes":
+            respuesta = {
+                "status":         "ok",
+                "pacientes":      listar_pacientes(),
                 "correlation_id": props.correlation_id,
             }
 

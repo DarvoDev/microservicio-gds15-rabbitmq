@@ -13,6 +13,7 @@ El sistema forma parte de una arquitectura mayor de microservicios de tests geri
 - **Guarda el resultado**: paciente, doctor, fecha, respuestas y puntaje quedan persistidos en una base de datos **MySQL**.
 - **Identifica al paciente por UID**: el paciente se identifica por el `uid` de su expediente en la aplicación general del hospital (no por nombre, ya que puede haber homónimos). El servicio mantiene una tabla local `pacientes` que mapea ese `uid` a un id interno propio.
 - **Consulta histórico**: a partir del `uid`, permite ver todas las pruebas previas de un paciente y el detalle de cualquiera de ellas.
+- **Lista pacientes**: muestra todos los pacientes registrados con su `uid`, nombre y cuántos tests tienen.
 - **Publica eventos**: cada resultado guardado se anuncia en un exchange de tipo publish/subscribe, para que otros servicios (auditoría, notificaciones, dashboards) puedan reaccionar sin acoplarse al flujo principal.
 
 Toda la comunicación entre las partes se hace de forma **asíncrona vía RabbitMQ**, no por llamadas HTTP directas.
@@ -49,6 +50,8 @@ El paciente no se identifica por su nombre, porque dos personas pueden llamarse 
 | `id` (`paciente_id`) | MySQL, en la tabla `pacientes` de este servicio (`AUTO_INCREMENT`) | Llave interna. Cada resultado guarda este valor en `resultados.paciente_id`. Solo existe dentro de la base `gds15`. |
 
 El `nombre` se guarda solo como referencia para mostrarlo en el histórico; nunca se usa para buscar.
+
+El `uid` se normaliza (sin espacios a los lados y en mayúsculas) y se valida contra un formato configurable con la variable `UID_PATRON`. Por defecto acepta letras, dígitos, `-` y `_`, hasta 64 caracteres. El detalle está en [`FORMATO_UID.md`](./FORMATO_UID.md).
 
 Cuando llega un mensaje, `service.py` traduce el `uid` a su `id` interno:
 
@@ -325,8 +328,9 @@ Si `service.py` o `interfaz.py` se ejecutan antes que `indermediario.py`, fallar
 1. Corres `indermediario.py` una vez al desplegar el sistema.
 2. Dejas `service.py` corriendo en segundo plano (o en un contenedor/servicio del sistema operativo).
 3. Cada usuario (doctor/geriatra) ejecuta `interfaz.py` y elige:
-   - **`[1] Aplicar test`** → responde las 15 preguntas SI/NO, ingresa el UID del expediente y nombre del paciente y el ID del doctor, y recibe el puntaje e interpretación al instante.
+   - **`[1] Aplicar test`** → responde las 15 preguntas SI/NO, ingresa el UID del expediente y nombre del paciente y el ID del doctor, y recibe el puntaje e interpretación al instante. Si el UID se deja vacío, la interfaz genera uno de prueba (`TMP-XXXXXXXX`) y lo muestra; esto es solo para pruebas, en producción el UID lo envía la aplicación general.
    - **`[2] Consultar histórico`** → ingresa el UID del expediente del paciente y ve la lista de pruebas previas, con opción de ver el detalle de una en particular.
+   - **`[3] Listar pacientes`** → muestra todos los pacientes registrados (UID, nombre y número de tests). Útil para recordar el UID antes de consultar un histórico.
 
 ### Ejecutar de nuevo (segunda vez en adelante)
 
@@ -366,6 +370,7 @@ Todas las variables tienen un valor por defecto pensado para correr todo en `loc
 | `DB_PASSWORD` | `service.py` | `""` | Contraseña del usuario de MySQL |
 | `DB_NAME` | `service.py` | `gds15` | Nombre de la base de datos (debe existir de antemano) |
 | `DB_URL` | `service.py` | *(vacío)* | Si se define, sobreescribe las 5 variables de `DB_*` anteriores. Formato: `mysql+pymysql://usuario:clave@host:puerto/nombre_bd?charset=utf8mb4` |
+| `UID_PATRON` | `service.py`, `interfaz.py` | `^[A-Z0-9_-]{1,64}$` | Expresión regular que debe cumplir el `uid` (ya en mayúsculas). Usar el mismo valor en ambos archivos. Ver [`FORMATO_UID.md`](./FORMATO_UID.md) |
 
 Ejemplo de uso con variables personalizadas:
 
@@ -408,6 +413,7 @@ DB_URL="mysql+pymysql://root:changeme@192.168.1.60:3306/gds15?charset=utf8mb4" p
 ├── service.py            # Lógica de negocio + persistencia + RPC
 ├── interfaz.py            # Cliente de línea de comandos
 ├── contrato.md            # Contrato JSON detallado de entrada/salida/eventos
+├── FORMATO_UID.md         # Formato y validación del uid del paciente
 ├── EJECUCION.md           # Guía paso a paso (Windows + Docker) y solución de problemas
 └── README.md               # Este archivo
 
@@ -443,6 +449,7 @@ DB_URL="mysql+pymysql://root:changeme@192.168.1.60:3306/gds15?charset=utf8mb4" p
 | `Can't connect to MySQL server` | MySQL aún inicializando o contenedor detenido. | `docker logs --tail 5 mysql-gds15` (esperar `ready for connections ... port: 3306`) / `docker start mysql-gds15`. |
 | `NOT_FOUND - no queue 'gds15.solicitud'` | No se corrió `indermediario.py` o se recreó RabbitMQ. | `python indermediario.py`. |
 | `interfaz.py` se queda esperando | `service.py` no está corriendo o falló. | Revisar la terminal del servicio. |
+| `uid inválido '...': debe cumplir el formato ...` | El uid tiene caracteres no permitidos (espacios, puntos, acentos) o no cumple `UID_PATRON`. | Corregir el uid o revisar [`FORMATO_UID.md`](./FORMATO_UID.md). |
 | `venv\Scripts\activate` bloqueado | Política de ejecución de PowerShell. | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` |
 
 Más detalle en [`EJECUCION.md`](./EJECUCION.md).
